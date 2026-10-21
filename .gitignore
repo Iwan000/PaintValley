@@ -12,3 +12,6 @@ __pycache__/
 
 # Rendered movies are large and already named per version (v6, v7, v8, ...); sheets and stills are kept.
 Renders/*.mp4
+
+# Downloaded source art (the imported .uasset in Content/ carries it); see Scripts/import_backdrop.py.
+SourceArt/

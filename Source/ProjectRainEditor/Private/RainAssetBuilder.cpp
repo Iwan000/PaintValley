@@ -4,6 +4,7 @@
 #include "RainNiagaraAuthoring.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Engine/TextureCube.h"
 #include "Engine/TextureRenderTargetCube.h"
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
@@ -13,6 +14,7 @@
 #include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionDynamicParameter.h"
 #include "Materials/MaterialExpressionParticleColor.h"
+#include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
@@ -177,19 +179,23 @@ namespace
 		return MPC;
 	}
 
+	// The drops' environment: a cube captured once from the stage (night backdrop, lamps, ground). With mips,
+	// so small or defocused drops can read a blurred environment (Materials/HLSL/RainDrop.hlsl).
 	UTextureRenderTargetCube* BuildEnvCube()
 	{
-		if (UTextureRenderTargetCube* Existing = LoadObject<UTextureRenderTargetCube>(nullptr, *(RainRoot / TEXT("Materials/RT_RainEnv.RT_RainEnv")), nullptr, LOAD_NoWarn | LOAD_Quiet))
+		UTextureRenderTargetCube* RT = LoadObject<UTextureRenderTargetCube>(nullptr, *(RainRoot / TEXT("Materials/RT_RainEnv.RT_RainEnv")), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!RT)
 		{
-			return Existing;
+			UPackage* Package = CreatePackage(*(RainRoot / TEXT("Materials/RT_RainEnv")));
+			RT = NewObject<UTextureRenderTargetCube>(Package, TEXT("RT_RainEnv"), RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(RT);
 		}
-		UPackage* Package = CreatePackage(*(RainRoot / TEXT("Materials/RT_RainEnv")));
-		UTextureRenderTargetCube* RT = NewObject<UTextureRenderTargetCube>(Package, TEXT("RT_RainEnv"), RF_Public | RF_Standalone | RF_Transactional);
 		RT->bHDR = true;
+		RT->bAutoGenerateMips = true;
+		RT->MipsSamplerFilter = TF_Bilinear;
 		RT->ClearColor = FLinearColor(0.01f, 0.012f, 0.015f, 1.0f);
 		RT->Init(512, PF_FloatRGBA);
 		RT->UpdateResourceImmediate(true);
-		FAssetRegistryModule::AssetCreated(RT);
 		SaveAsset(RT);
 		return RT;
 	}
@@ -360,7 +366,7 @@ namespace
 			{ TEXT("RainAperture"), F, FVector4f(1.25f) },
 			{ TEXT("RainDofScale"), F, FVector4f(0.6f) },
 			{ TEXT("RainPixelScale"), F, FVector4f(1400.0f) },
-			{ TEXT("RainLodPixels"), F, FVector4f(6.0f) },
+			{ TEXT("RainLodPixels"), F, FVector4f(2.5f) },
 			{ TEXT("RainAmbient"), V, FVector4f(0.01f, 0.012f, 0.015f, 0) },
 			{ TEXT("RainForward"), F, FVector4f(1.0f) },
 			{ TEXT("RainSide"), F, FVector4f(0.003f) },
@@ -561,6 +567,54 @@ namespace
 		CompileMaterialAndReport(M, Report);
 		return M;
 	}
+
+	// The night backdrop on the sky dome (Materials/HLSL/NightSky.hlsl): the imported HDR panorama
+	// (Scripts/import_backdrop.py) at infinity, with Exposure and Yaw parameters for the stage.
+	UMaterial* BuildNightSkyMaterial(FString& Report)
+	{
+		UTextureCube* Panorama = LoadObject<UTextureCube>(nullptr, *(RainRoot / TEXT("Environment/T_NightSky.T_NightSky")), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!Panorama)
+		{
+			Report += TEXT("M_NightSky skipped: import the backdrop first (Scripts/import_backdrop.py)\n");
+			return nullptr;
+		}
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_NightSky"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Opaque;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = true;
+		M->bIsSky = true;
+
+		UMaterialExpressionCustom* Custom = AddExpr<UMaterialExpressionCustom>(M, -300, 0);
+		Custom->Description = TEXT("NightSky (Materials/HLSL/NightSky.hlsl)");
+		Custom->Code = LoadTextFile(TEXT("Materials/HLSL/NightSky.hlsl"));
+		Custom->OutputType = CMOT_Float3;
+		Custom->Inputs.Reset();
+		auto AddInput = [Custom](const TCHAR* Name, UMaterialExpression* From)
+		{
+			FCustomInput& In = Custom->Inputs.AddDefaulted_GetRef();
+			In.InputName = Name;
+			In.Input.Connect(0, From);
+		};
+		AddInput(TEXT("CamVec"), AddExpr<UMaterialExpressionCameraVectorWS>(M, -700, -200));
+		UMaterialExpressionTextureObjectParameter* Sky = AddExpr<UMaterialExpressionTextureObjectParameter>(M, -700, -100);
+		Sky->ParameterName = TEXT("Sky");
+		Sky->Texture = Panorama;
+		Sky->SamplerType = UMaterialExpressionTextureBase::GetSamplerTypeForTexture(Panorama);
+		AddInput(TEXT("Sky"), Sky);
+		UMaterialExpressionScalarParameter* Exposure = AddExpr<UMaterialExpressionScalarParameter>(M, -700, 0);
+		Exposure->ParameterName = TEXT("Exposure");
+		Exposure->DefaultValue = 1.0f;
+		AddInput(TEXT("Exposure"), Exposure);
+		UMaterialExpressionScalarParameter* Yaw = AddExpr<UMaterialExpressionScalarParameter>(M, -700, 100);
+		Yaw->ParameterName = TEXT("Yaw");
+		Yaw->DefaultValue = 0.0f;
+		AddInput(TEXT("YawDeg"), Yaw);
+
+		M->GetEditorOnlyData()->EmissiveColor.Connect(0, Custom);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
 }
 
 FString URainBuilderLibrary::BuildStageMaterials()
@@ -573,6 +627,7 @@ FString URainBuilderLibrary::BuildStageMaterials()
 	}
 	BuildBasicMaterial(Report);
 	BuildGroundMaterial(MPC, Report);
+	BuildNightSkyMaterial(Report);
 	return Report;
 }
 

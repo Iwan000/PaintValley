@@ -3,11 +3,13 @@
 Only what the drops need: a wet ground, the magician (UE mannequin), four high stage lamps with visible
 lamp heads (two behind the magician backlight the rain; the drops' forward-scattering glints and the
 bright points their ball lenses refract),
-a key light, thin height fog, and the rain/controller/camera actors. The v6 Greenwich stage (colonnades,
-crowd, bus) lives in Scripts/legacy/build_stage_greenwich.py.
+a key light, thin height fog, a night backdrop (an HDR panorama of a wet city square, for the drops to
+refract), and the rain/controller/camera actors. The v6 Greenwich stage (colonnades, crowd, bus) lives in
+Scripts/legacy/build_stage_greenwich.py.
 
 Run inside the editor:  python3 Scripts/ue_cmd.py -f Scripts/build_stage.py
-Assumes URainBuilderLibrary.build_rain_assets() and build_stage_materials() have been run.
+Assumes Scripts/import_backdrop.py, URainBuilderLibrary.build_rain_assets() and build_stage_materials()
+have been run.
 """
 import math
 import unreal
@@ -138,6 +140,13 @@ LAMPS = [
 ]
 TARGET = (0.0, 0.0, 140.0)
 
+# Night backdrop (M_NightSky): panorama brightness on the stage and its turn about the vertical (the lit
+# town hall behind Atlas for the hero camera, which looks down +X). The dome only has to enclose the
+# ground; it is drawn at infinity.
+SKY_EXPOSURE = 40.0
+SKY_YAW = 0.0
+SKY_RADIUS = 10000.0
+
 
 def build():
     open_fresh_level()
@@ -147,8 +156,23 @@ def build():
     pole_mat = mi("MI_Pole", (0.02, 0.02, 0.022), 0.4, metal=0.8)
     ground_mat = unreal.load_asset(ROOT + "/Materials/M_WetGround")
 
-    # ---- ground: one wet paved plane with puddles and rain ripples (WetGround.hlsl)
-    mesh(PLANE, (0, 0, 0), (60, 60, 1), mat=ground_mat, label="Ground_Wet")
+    # ---- ground: one wet paved plane with puddles and rain ripples (WetGround.hlsl), out to where the
+    # backdrop's own square takes over
+    mesh(PLANE, (0, 0, 0), (120, 120, 1), mat=ground_mat, label="Ground_Wet")
+
+    # ---- night backdrop: an HDR panorama of a wet city square at night (NightSky.hlsl). It is the
+    # background and, captured into the drops' environment cube, what every drop refracts: on black, a
+    # water drop can only show up as a point of light.
+    sky_path = f"{MI_PATH}/MI_NightSky"
+    sky_mi = unreal.load_asset(sky_path) if unreal.EditorAssetLibrary.does_asset_exist(sky_path) else \
+        asset_tools.create_asset("MI_NightSky", MI_PATH, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+    mel.set_material_instance_parent(sky_mi, unreal.load_asset(ROOT + "/Materials/M_NightSky"))
+    mel.set_material_instance_scalar_parameter_value(sky_mi, "Exposure", SKY_EXPOSURE)
+    mel.set_material_instance_scalar_parameter_value(sky_mi, "Yaw", SKY_YAW)
+    mel.update_material_instance(sky_mi)
+    unreal.EditorAssetLibrary.save_loaded_asset(sky_mi)
+    s_sky = SKY_RADIUS / 50.0
+    mesh(SPHERE, (0, 0, 0), (s_sky, s_sky, s_sky), mat=sky_mi, label="NightSky", folder="Atmosphere", shadows=False)
 
     # ---- lamps: spotlights with a small hot lamp head on a thin pole
     glints = []
@@ -207,6 +231,9 @@ def build():
     sc = sky.light_component
     sc.set_editor_property("intensity", 0.6)
     sc.set_editor_property("lower_hemisphere_is_black", True)
+    # Everything beyond 50 m counts as sky: the backdrop dome (100 m) lights the stage and shows in the
+    # wet ground's reflections; the stage itself (lamps out to 40 m) stays out of the capture.
+    sc.set_editor_property("sky_distance_threshold", 5000.0)
     sc.set_editor_property("real_time_capture", False)
     sc.set_editor_property("light_color", unreal.Color(120, 140, 170, 255))
     sc.set_mobility(unreal.ComponentMobility.MOVABLE)
@@ -297,6 +324,8 @@ def build():
 
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
         unreal.Vector(*cam_loc), look_rot(cam_loc, (0, 0, 150)))
+    # The sky light lights the stage with what it captures: now the backdrop's overcast city sky.
+    sc.recapture_sky()
     les.save_current_level()
     print(f"Stage built: {len(eas.get_all_level_actors())} actors, glint lights = {len(glints[:6])}")
     return ctrl

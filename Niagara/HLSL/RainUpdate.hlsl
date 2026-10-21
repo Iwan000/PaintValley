@@ -234,7 +234,7 @@ if (dot(PrPerp, PrPerp) < 1e-6)
 float PrRound = 1.0 - saturate((PrL / max(PrW, 1e-4) - 1.0) * 2.0);
 Particles.SpriteAlignment = normalize(lerp(PrDir, normalize(PrPerp), PrRound));
 // ---------------------------------------------------------------- screen-size LOD
-// Drops narrower than ~6 px can't show their ball-lens image (it aliases into thin arcs): light them once per particle
+// Drops narrower than a few pixels can't show their ball-lens image: light them once per particle
 // here (forward-scattering phase towards each stage light + ambient) and let the material take a
 // cheap path. Only resolved drops near the camera get the full per-pixel ball-lens shading.
 // The phase is broad: light refracted straight through a water sphere leaves it deviated by 0-83 deg,
@@ -243,23 +243,18 @@ Particles.SpriteAlignment = normalize(lerp(PrDir, normalize(PrPerp), PrRound));
 float PrPixW = PrW * User.RainPixelScale / PrCamD;
 float PrSimple = PrPixW < User.RainLodPixels ? 1.0 : 0.0;
 
-// Particle-space depth of field (thin lens, object-space blur diameter b = A |d - s| / s). The drops
-// render after the engine's DOF so beads in focus stay crisp; out-of-focus drops become soft
-// translucent discs (the drop convolved with the blur disc) whose light is spread over the disc.
-// User.RainDofScale << 1: the deep focus of the film's plates, where even drops near the lens are sharp.
-// Once the blur passes about half the drop's width, the bright points of its ball-lens image are
-// smeared over the whole disc: only the per-particle light is left (cheap path).
+// Particle-space depth of field: the camera's own lens (thin lens, object-space blur diameter
+// b = A |d - s| / s, A = focal length / f-number; User.RainDofScale = 1 is the real lens). The drops render
+// after the engine's DOF, so each drop is blurred here: drawn over its blur disc with its light spread
+// over the disc (alpha / blur^2), so a defocused drop is always dimmer than in focus, never a bright
+// bokeh ball. Resolved drops keep their ball-lens shading, smeared by the blur in the material (Dyn.z).
 // No drop is drawn smaller than 1.5 px either: a sub-pixel sprite crawls and flickers under temporal
 // AA, so its light is spread over a 1.5 px footprint instead (same energy, like the blur).
 float PrCoC = User.RainAperture * abs(PrCamD - User.RainFocusDist) / max(User.RainFocusDist, 1.0) * User.RainDofScale;
 float PrBlurW = max(sqrt(PrW * PrW + PrCoC * PrCoC), 1.5 * PrCamD / max(User.RainPixelScale, 1.0));
 float PrBlur = PrBlurW / PrW;
 float PrSoft = sqrt(max(PrBlurW * PrBlurW - PrW * PrW, 0.0)) / PrBlurW;
-if (PrBlur > 1.15)
-{
-	PrSimple = 1.0;
-}
-PrVis *= pow(1.0 / PrBlur, 1.8);
+PrVis *= 1.0 / (PrBlur * PrBlur);
 float PrGrow = PrBlurW - PrW;
 float3 PrLum = User.RainAmbient;
 if (PrVis > 0.002)
@@ -280,11 +275,11 @@ if (PrVis > 0.002)
 Particles.SpriteSize = PrVis > 0.002 ? float2(PrW + PrGrow, PrL + PrGrow) : float2(0.0, 0.0);
 Particles.Color = float4(PrLum * (0.85 + 0.3 * PrRnd.y), PrVis);
 // x: stretch L/W. y: shading path, 1 = cheap (per-particle light); -1..0 = full ball-lens shading,
-// with -y = how much of the per-particle scattered light to add (1 at the switch to the cheap path, by
-// size or by blur; 0 from 4x the size threshold / in focus), so drops don't change brightness when they
-// switch (the night environment refracted by a resolved drop is much darker than the forward-scattering
-// estimate). z: soft (defocused) fraction of the disc radius. w: random.
-float PrGlow = max(saturate(1.0 - (PrPixW - User.RainLodPixels) / (3.0 * max(User.RainLodPixels, 0.1))), saturate((PrBlur - 1.0) / 0.15));
+// with -y = how much of the per-particle scattered light to add (1 at the switch to the cheap path, 0 from
+// 4x the size threshold), so drops don't change brightness when they switch (the environment refracted
+// by a resolved drop is darker than the forward-scattering estimate). z: soft (defocused) fraction of
+// the disc radius. w: random.
+float PrGlow = saturate(1.0 - (PrPixW - User.RainLodPixels) / (3.0 * max(User.RainLodPixels, 0.1)));
 Particles.DynamicMaterialParameter = float4((PrL + PrGrow) / (PrW + PrGrow), PrSimple > 0.5 ? 1.0 : -PrGlow, PrSoft, PrRnd.x);
 
 #undef PR_NEXT

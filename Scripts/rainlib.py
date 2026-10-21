@@ -85,3 +85,26 @@ def cam(label, loc, target, focal=50.0, fstop=2.0, focus=None):
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
         unreal.Vector(*loc), unreal.MathLibrary.make_rot_from_x(d))
     return a
+
+
+def sky(exposure=None, yaw=None):
+    """Set the night backdrop's exposure / yaw (MI_NightSky), then recapture the drops' environment and the sky light."""
+    mi = unreal.load_asset("/Game/RainMagic/Materials/Instances/MI_NightSky")
+    mel = unreal.MaterialEditingLibrary
+    if exposure is not None:
+        mel.set_material_instance_scalar_parameter_value(mi, "Exposure", float(exposure))
+    if yaw is not None:
+        mel.set_material_instance_scalar_parameter_value(mi, "Yaw", float(yaw))
+    mel.update_material_instance(mi)
+    recapture()
+    return mi
+
+
+def recapture():
+    """Re-capture the drops' environment cube and the sky light (after changing the stage)."""
+    c = controller()
+    if c:
+        c.capture_environment()
+    for a in eas.get_all_level_actors():
+        if isinstance(a, unreal.SkyLight):
+            a.light_component.recapture_sky()

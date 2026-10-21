@@ -159,8 +159,8 @@ public:
 
 	// ------------------------------------------------------------------ look
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float EnvGain = 1.5f;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float GlintGain = 20.0f;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float StreakGain = 20.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float GlintGain = 8.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float StreakGain = 40.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float DropExposure = 1.0f;
 	/** Converts a light's intensity into "glint brightness at 10 m". */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float GlintPerCandela = 0.0004f;
@@ -169,10 +169,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") FVector Wind = FVector(40.0f, 0.0f, 0.0f);
 	/** Gustiness of the air (cm/s): tilts each falling streak a little its own way. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float Gust = 90.0f;
-	/** Brightness of unresolved (sub-pixel) drops: forward scattering of the stage lights. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float ScatterGain = 6.0f;
-	/** Radiance of the night sky's glow above the horizon, refracted and reflected by resolved drops (their bright crescent). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") FLinearColor SkyGlow = FLinearColor(0.08f, 0.088f, 0.104f);
+	/** Brightness of unresolved (sub-pixel) drops: forward scattering of the stage lights. Set against the night
+	 *  backdrop: the drops show up mostly by what they refract, the lamps add a bright core. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float ScatterGain = 2.0f;
+	/** Extra sky radiance above the horizon in the drops' ball lenses. 0: the night backdrop's own sky (captured into
+	 *  the drops' environment) is all they see; only a stage without a lit sky needs this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") FLinearColor SkyGlow = FLinearColor(0.0f, 0.0f, 0.0f);
 	/** Ambient radiance of unresolved drops (night sky + city glow). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") FLinearColor AmbientDrop = FLinearColor(0.006f, 0.0065f, 0.0075f);
 	/** Hanging drops are drawn this much bigger than physical (the film's beads read large). */
@@ -181,9 +183,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float PixelScaleOverride = 0.0f;
 	/** >0: the output image width used for drop LOD (offline renders use a different size than the PIE window). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float RenderWidthOverride = 0.0f;
-	/** Particle-space depth of field strength. 1 = the camera's physical thin lens (drops near the lens become big
-	 *  bokeh discs); the film's plates had deep focus, with sharp drops right up to the lens. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float DofScale = 0.15f;
+	/** Particle-space depth of field strength. 1 = the camera's physical thin lens (focal length, f-number, focus
+	 *  distance): drops off the focal plane blur and dim (their light spread over the blur disc). 0 = pinhole. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float DofScale = 1.0f;
 
 	// ------------------------------------------------------------------ API
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rain")
