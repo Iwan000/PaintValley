@@ -1,0 +1,27 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.7",
+	"Category": "",
+	"Description": "Project Rain - Niagara recreation of the Now You See Me 2 frozen rain trick",
+	"Modules": [
+		{
+			"Name": "ProjectRain",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [ "Engine", "Niagara" ]
+		},
+		{
+			"Name": "ProjectRainEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [ "Engine", "UnrealEd", "Niagara", "NiagaraEditor" ]
+		}
+	],
+	"Plugins": [
+		{ "Name": "Niagara", "Enabled": true },
+		{ "Name": "PythonScriptPlugin", "Enabled": true },
+		{ "Name": "EditorScriptingUtilities", "Enabled": true },
+		{ "Name": "MovieRenderPipeline", "Enabled": true },
+		{ "Name": "ModelingToolsEditorMode", "Enabled": false, "TargetAllowList": [ "Editor" ] }
+	]
+}

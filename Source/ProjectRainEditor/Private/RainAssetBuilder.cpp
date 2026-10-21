@@ -1,0 +1,645 @@
+// Project Rain - builds every generated asset: material parameter collection, environment cube
+// render target, the raindrop material, Niagara HLSL modules and the NS_RainMagic system.
+#include "RainBuilderLibrary.h"
+#include "RainNiagaraAuthoring.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Engine/TextureRenderTargetCube.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionCameraVectorWS.h"
+#include "Materials/MaterialExpressionCollectionParameter.h"
+#include "Materials/MaterialExpressionComponentMask.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionDynamicParameter.h"
+#include "Materials/MaterialExpressionParticleColor.h"
+#include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionTextureObjectParameter.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionTime.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "NiagaraEditorUtilities.h"
+#include "NiagaraEmitter.h"
+#include "NiagaraNodeFunctionCall.h"
+#include "NiagaraScript.h"
+#include "NiagaraSpriteRendererProperties.h"
+#include "NiagaraSystem.h"
+#include "NiagaraActor.h"
+#include "NiagaraComponent.h"
+#include "EngineUtils.h"
+#include "Editor.h"
+#include "ShaderCompiler.h"
+#include "MaterialShared.h"
+
+using namespace RainAuthoring;
+
+namespace
+{
+	const FString RainRoot = TEXT("/Game/RainMagic");
+
+	constexpr int32 ParticleModuleMask =
+		(1 << int32(ENiagaraScriptUsage::ParticleSpawnScript)) |
+		(1 << int32(ENiagaraScriptUsage::ParticleSpawnScriptInterpolated)) |
+		(1 << int32(ENiagaraScriptUsage::ParticleUpdateScript)) |
+		(1 << int32(ENiagaraScriptUsage::ParticleSimulationStageScript));
+
+	constexpr int32 NumStageLights = 6;
+
+	// The rain field (Niagara/HLSL/RainField.hlsl): one 16 m x 16 m period of an infinite periodic rain,
+	// 6 m deep, kept in front of the camera with the camera 1.5 m inside its back edge. Drops are visible
+	// out to ~14 m and fade out over the last 6 m. Lifted drops are parked at 24 m.
+	struct FRainField
+	{
+		float Cell = 1600.0f;
+		float Back = 150.0f;
+		float Height = 600.0f;
+		float FarFade = 600.0f;
+		float ParkHeight = 2400.0f;
+	};
+	const FRainField RainField;
+
+	// A particle module's HLSL with the rain-field prelude in front of it and the field's constants filled in.
+	FString LoadParticleModule(const TCHAR* File)
+	{
+		FString Text = LoadTextFile(TEXT("Niagara/HLSL/RainField.hlsl")) + TEXT("\n") + LoadTextFile(File);
+		auto F = [](float V) { return FString::Printf(TEXT("%.4f"), V); };
+		Text.ReplaceInline(TEXT("$(CELL)"), *F(RainField.Cell));
+		Text.ReplaceInline(TEXT("$(BACK)"), *F(RainField.Back));
+		Text.ReplaceInline(TEXT("$(HEIGHT)"), *F(RainField.Height));
+		Text.ReplaceInline(TEXT("$(FAR_FADE)"), *F(RainField.FarFade));
+		Text.ReplaceInline(TEXT("$(PARK_HEIGHT)"), *F(RainField.ParkHeight));
+		return Text;
+	}
+
+	// Rebuilds a material in place (keeps the UObject so instances and renderers stay valid).
+	UMaterial* GetOrCreateMaterial(const FString& Path, const FString& Name)
+	{
+		UMaterial* M = LoadObject<UMaterial>(nullptr, *(Path / Name + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (M)
+		{
+			UMaterialEditingLibrary::DeleteAllMaterialExpressions(M);
+			M->GetEditorOnlyData()->EmissiveColor.Expression = nullptr;
+			M->GetEditorOnlyData()->Opacity.Expression = nullptr;
+			M->GetEditorOnlyData()->BaseColor.Expression = nullptr;
+			M->GetEditorOnlyData()->Normal.Expression = nullptr;
+			M->GetEditorOnlyData()->Roughness.Expression = nullptr;
+			M->GetEditorOnlyData()->Metallic.Expression = nullptr;
+			return M;
+		}
+		UPackage* Package = CreatePackage(*(Path / Name));
+		M = NewObject<UMaterial>(Package, *Name, RF_Public | RF_Standalone | RF_Transactional);
+		FAssetRegistryModule::AssetCreated(M);
+		return M;
+	}
+
+	bool CompileMaterialAndReport(UMaterial* M, FString& Report)
+	{
+		M->PreEditChange(nullptr);
+		M->PostEditChange();
+		UMaterialEditingLibrary::RecompileMaterial(M);
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
+		}
+		bool bOk = true;
+		if (const FMaterialResource* Res = M->GetMaterialResource(GMaxRHIShaderPlatform))
+		{
+			for (const FString& Err : Res->GetCompileErrors())
+			{
+				Report += FString::Printf(TEXT("  MATERIAL ERROR %s: %s\n"), *M->GetName(), *Err);
+				bOk = false;
+			}
+		}
+		Report += FString::Printf(TEXT("Material %s %s\n"), *M->GetPathName(), bOk ? TEXT("compiled") : TEXT("HAS ERRORS"));
+		SaveAsset(M);
+		return bOk;
+	}
+
+	// ------------------------------------------------------------------ material parameter collection
+	UMaterialParameterCollection* BuildCollection()
+	{
+		// Created once; later builds only add parameters that are missing (instances keep their GUIDs).
+		UMaterialParameterCollection* MPC = LoadObject<UMaterialParameterCollection>(nullptr, *(RainRoot / TEXT("Materials/MPC_Rain.MPC_Rain")), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		const bool bCreated = MPC == nullptr;
+		if (bCreated)
+		{
+			UPackage* Package = CreatePackage(*(RainRoot / TEXT("Materials/MPC_Rain")));
+			MPC = NewObject<UMaterialParameterCollection>(Package, TEXT("MPC_Rain"), RF_Public | RF_Standalone | RF_Transactional);
+		}
+		bool bChanged = bCreated;
+		auto AddVector = [MPC, &bChanged](const TCHAR* Name, const FLinearColor& Default)
+		{
+			if (MPC->GetVectorParameterByName(Name))
+			{
+				return;
+			}
+			FCollectionVectorParameter P;
+			P.ParameterName = Name;
+			P.DefaultValue = Default;
+			MPC->VectorParameters.Add(P);
+			bChanged = true;
+		};
+		auto AddScalar = [MPC, &bChanged](const TCHAR* Name, float Default)
+		{
+			if (MPC->GetScalarParameterByName(Name))
+			{
+				return;
+			}
+			FCollectionScalarParameter P;
+			P.ParameterName = Name;
+			P.DefaultValue = Default;
+			MPC->ScalarParameters.Add(P);
+			bChanged = true;
+		};
+		AddVector(TEXT("CamPos"), FLinearColor(0, -800, 170, 0));
+		// x env gain, y glint gain, z falling-streak gain, w exposure (strobe multiplies this)
+		AddVector(TEXT("Look"), FLinearColor(1.0f, 1.0f, 4.0f, 1.0f));
+		for (int32 i = 0; i < NumStageLights; ++i)
+		{
+			AddVector(*FString::Printf(TEXT("L%dP"), i), FLinearColor(0, 0, -100000, 50));
+			AddVector(*FString::Printf(TEXT("L%dC"), i), FLinearColor(0, 0, 0, 0));
+		}
+		// Radiance of the night sky's glow above the horizon, seen in the drops' ball lenses.
+		AddVector(TEXT("SkyGlow"), FLinearColor(0.08f, 0.088f, 0.104f, 0.0f));
+		AddScalar(TEXT("Wetness"), 1.0f);
+		AddScalar(TEXT("RainIntensity"), 1.0f);
+		AddScalar(TEXT("Strobe"), 1.0f);
+		if (bCreated)
+		{
+			FAssetRegistryModule::AssetCreated(MPC);
+		}
+		if (bChanged)
+		{
+			MPC->PostEditChange();
+			SaveAsset(MPC);
+		}
+		return MPC;
+	}
+
+	UTextureRenderTargetCube* BuildEnvCube()
+	{
+		if (UTextureRenderTargetCube* Existing = LoadObject<UTextureRenderTargetCube>(nullptr, *(RainRoot / TEXT("Materials/RT_RainEnv.RT_RainEnv")), nullptr, LOAD_NoWarn | LOAD_Quiet))
+		{
+			return Existing;
+		}
+		UPackage* Package = CreatePackage(*(RainRoot / TEXT("Materials/RT_RainEnv")));
+		UTextureRenderTargetCube* RT = NewObject<UTextureRenderTargetCube>(Package, TEXT("RT_RainEnv"), RF_Public | RF_Standalone | RF_Transactional);
+		RT->bHDR = true;
+		RT->ClearColor = FLinearColor(0.01f, 0.012f, 0.015f, 1.0f);
+		RT->Init(512, PF_FloatRGBA);
+		RT->UpdateResourceImmediate(true);
+		FAssetRegistryModule::AssetCreated(RT);
+		SaveAsset(RT);
+		return RT;
+	}
+
+	template<typename T>
+	T* AddExpr(UMaterial* M, int32 X, int32 Y)
+	{
+		return Cast<T>(UMaterialEditingLibrary::CreateMaterialExpression(M, T::StaticClass(), X, Y));
+	}
+
+	UMaterial* BuildDropMaterial(UMaterialParameterCollection* MPC, UTextureRenderTargetCube* EnvCube, FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_RainDrop"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Translucent;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = true;
+		M->bUsedWithNiagaraSprites = true;
+		M->TranslucencyPass = MTP_AfterDOF;
+		M->bEnableResponsiveAA = true;
+
+		UMaterialExpressionCustom* Custom = AddExpr<UMaterialExpressionCustom>(M, -300, 0);
+		Custom->Description = TEXT("RainDrop (Materials/HLSL/RainDrop.hlsl)");
+		Custom->Code = LoadTextFile(TEXT("Materials/HLSL/RainDrop.hlsl"));
+		Custom->OutputType = CMOT_Float4;
+		Custom->Inputs.Reset();
+
+		auto AddInput = [Custom](const TCHAR* Name, UMaterialExpression* From, int32 OutputIndex)
+		{
+			FCustomInput& In = Custom->Inputs.AddDefaulted_GetRef();
+			In.InputName = Name;
+			In.Input.Connect(OutputIndex, From);
+		};
+
+		int32 Y = -900;
+		UMaterialExpressionTextureCoordinate* UV = AddExpr<UMaterialExpressionTextureCoordinate>(M, -900, Y += 80);
+		AddInput(TEXT("UV"), UV, 0);
+
+		UMaterialExpressionDynamicParameter* Dyn = AddExpr<UMaterialExpressionDynamicParameter>(M, -900, Y += 80);
+		Dyn->ParamNames = { TEXT("Stretch"), TEXT("Path"), TEXT("Soft"), TEXT("Random") };
+		AddInput(TEXT("DynX"), Dyn, 0);
+		AddInput(TEXT("DynY"), Dyn, 1);
+		AddInput(TEXT("DynZ"), Dyn, 2);
+		AddInput(TEXT("DynW"), Dyn, 3);
+
+		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -900, Y += 160);
+		AddInput(TEXT("PCol"), PColor, 5); // RGBA (outputs: RGB, R, G, B, A, RGBA)
+
+		UMaterialExpressionCameraVectorWS* CamVec = AddExpr<UMaterialExpressionCameraVectorWS>(M, -900, Y += 80);
+		AddInput(TEXT("CamVec"), CamVec, 0);
+
+		UMaterialExpressionTextureObjectParameter* Env = AddExpr<UMaterialExpressionTextureObjectParameter>(M, -900, Y += 80);
+		Env->ParameterName = TEXT("EnvCube");
+		Env->Texture = EnvCube;
+		Env->SamplerType = SAMPLERTYPE_Color;
+		AddInput(TEXT("Env"), Env, 0);
+
+		auto AddCollectionInput = [&](const TCHAR* Name)
+		{
+			UMaterialExpressionCollectionParameter* P = AddExpr<UMaterialExpressionCollectionParameter>(M, -900, Y += 60);
+			P->Collection = MPC;
+			P->ParameterName = Name;
+			P->ParameterId = MPC->GetParameterId(Name);
+			AddInput(Name, P, 0);
+		};
+		AddCollectionInput(TEXT("CamPos"));
+		Custom->Inputs.Last().InputName = TEXT("CamW");
+		AddCollectionInput(TEXT("Look"));
+		AddCollectionInput(TEXT("SkyGlow"));
+		for (int32 i = 0; i < NumStageLights; ++i)
+		{
+			AddCollectionInput(*FString::Printf(TEXT("L%dP"), i));
+		}
+		for (int32 i = 0; i < NumStageLights; ++i)
+		{
+			AddCollectionInput(*FString::Printf(TEXT("L%dC"), i));
+		}
+
+		UMaterialExpressionComponentMask* RGB = AddExpr<UMaterialExpressionComponentMask>(M, 0, -60);
+		RGB->R = RGB->G = RGB->B = true;
+		RGB->A = false;
+		RGB->Input.Connect(0, Custom);
+		UMaterialExpressionComponentMask* A = AddExpr<UMaterialExpressionComponentMask>(M, 0, 60);
+		A->R = A->G = A->B = false;
+		A->A = true;
+		A->Input.Connect(0, Custom);
+
+		UMaterialEditingLibrary::ConnectMaterialProperty(RGB, TEXT(""), MP_EmissiveColor);
+		UMaterialEditingLibrary::ConnectMaterialProperty(A, TEXT(""), MP_Opacity);
+
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+
+	// ------------------------------------------------------------------ Niagara
+	// The drops: one size distribution (Marshall-Palmer, truncated) for the whole field, shifted to the big
+	// drops of film rain machines (mean ~2 mm instead of ~1.3 mm for natural heavy rain).
+	struct FRainDropConfig
+	{
+		float RainRate = 30.0f;
+		float LambdaScale = 0.5f;
+		float DMinMm = 1.0f;
+		float DMaxMm = 6.0f;
+		int32 Seed = 29;
+	};
+
+	FString Fill(FString Text, const FRainDropConfig& C)
+	{
+		auto F = [](float V) { return FString::Printf(TEXT("%.4f"), V); };
+		Text.ReplaceInline(TEXT("$(SEED)"), *FString::Printf(TEXT("%u"), uint32(C.Seed) * 0x9E3779B9u));
+		Text.ReplaceInline(TEXT("$(RAIN_RATE)"), *F(C.RainRate));
+		Text.ReplaceInline(TEXT("$(LAMBDA_SCALE)"), *F(C.LambdaScale));
+		Text.ReplaceInline(TEXT("$(D_MIN_MM)"), *F(C.DMinMm));
+		Text.ReplaceInline(TEXT("$(D_MAX_MM)"), *F(C.DMaxMm));
+		return Text;
+	}
+
+	// The window follows the camera anywhere in the level: bounds that never cull the system.
+	const FBox RainBounds(FVector(-50000.0, -50000.0, -1000.0), FVector(50000.0, 50000.0, 5000.0));
+
+	struct FUserParamDefault
+	{
+		const TCHAR* Name;
+		FNiagaraTypeDefinition Type;
+		FVector4f Value;
+	};
+
+	TArray<FUserParamDefault> RainUserParameters()
+	{
+		const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+		const FNiagaraTypeDefinition V = FNiagaraTypeDefinition::GetVec3Def();
+		const FNiagaraTypeDefinition V4 = FNiagaraTypeDefinition::GetVec4Def();
+		return {
+			{ TEXT("RainCameraPos"), V, FVector4f(-650, 45, 160, 0) },
+			{ TEXT("RainCameraFwd"), V, FVector4f(1, 0, 0, 0) },
+			{ TEXT("RainViewTan"), F, FVector4f(0.36f) },
+			{ TEXT("RainStopCenter"), V, FVector4f(0, 0, 150, 0) },
+			{ TEXT("RainStopRadius"), F, FVector4f(0) },
+			{ TEXT("RainStopSoftness"), F, FVector4f(250) },
+			{ TEXT("RainStopTau"), F, FVector4f(0.07f) },
+			{ TEXT("RainHover"), F, FVector4f(1.2f) },
+			{ TEXT("RainLiftTime"), F, FVector4f(-1) },
+			{ TEXT("RainLiftSpread"), F, FVector4f(2.5f) },
+			{ TEXT("RainLiftAccel"), F, FVector4f(60) },
+			{ TEXT("RainLiftMaxSpeed"), F, FVector4f(400) },
+			{ TEXT("RainChaos"), F, FVector4f(0) },
+			{ TEXT("RainChaosSwirl"), F, FVector4f(380) },
+			{ TEXT("RainChaosTurb"), F, FVector4f(260) },
+			{ TEXT("RainHandPos"), V, FVector4f(0, 0, -100000, 0) },
+			{ TEXT("RainHandVel"), V, FVector4f(0) },
+			{ TEXT("RainHandRadius"), F, FVector4f(90) },
+			{ TEXT("RainHandStrength"), F, FVector4f(0) },
+			{ TEXT("RainPush"), V, FVector4f(0) },
+			{ TEXT("RainBrushDir"), V, FVector4f(1, 0, 0, 0) },
+			{ TEXT("RainBrushSpin"), V, FVector4f(0) },
+			{ TEXT("RainBrushStrength"), F, FVector4f(0) },
+			{ TEXT("RainBrushCone"), F, FVector4f(0.0025f) },
+			{ TEXT("RainWind"), V, FVector4f(0) },
+			{ TEXT("RainGust"), F, FVector4f(90.0f) },
+			{ TEXT("RainWrap"), F, FVector4f(1) },
+			{ TEXT("RainRespawnSpread"), F, FVector4f(2.5f) },
+			{ TEXT("RainActiveFraction"), F, FVector4f(1) },
+			{ TEXT("RainShutter"), F, FVector4f(1.0f / 48.0f) },
+			{ TEXT("RainSizeScale"), F, FVector4f(1.0f) },
+			{ TEXT("RainSplash"), F, FVector4f(1.0f) },
+			{ TEXT("RainFrozenSizeScale"), F, FVector4f(2.2f) },
+			{ TEXT("RainFocusDist"), F, FVector4f(600.0f) },
+			{ TEXT("RainAperture"), F, FVector4f(1.25f) },
+			{ TEXT("RainDofScale"), F, FVector4f(0.6f) },
+			{ TEXT("RainPixelScale"), F, FVector4f(1400.0f) },
+			{ TEXT("RainLodPixels"), F, FVector4f(6.0f) },
+			{ TEXT("RainAmbient"), V, FVector4f(0.01f, 0.012f, 0.015f, 0) },
+			{ TEXT("RainForward"), F, FVector4f(1.0f) },
+			{ TEXT("RainSide"), F, FVector4f(0.003f) },
+			{ TEXT("RainL0P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL0C"), V4, FVector4f(0) },
+			{ TEXT("RainL1P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL1C"), V4, FVector4f(0) },
+			{ TEXT("RainL2P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL2C"), V4, FVector4f(0) },
+			{ TEXT("RainL3P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL3C"), V4, FVector4f(0) },
+			{ TEXT("RainL4P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL4C"), V4, FVector4f(0) },
+			{ TEXT("RainL5P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL5C"), V4, FVector4f(0) },
+		};
+	}
+
+
+	// Particle attributes used by the HLSL must be declared before custom HLSL can touch them.
+	TArray<FNiagaraVariable> RainAttributes()
+	{
+		const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+		const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
+		const FNiagaraTypeDefinition V4 = FNiagaraTypeDefinition::GetVec4Def();
+		return {
+			FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
+			FNiagaraVariable(V3, TEXT("Particles.Velocity")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.SpriteSize")),
+			FNiagaraVariable(V3, TEXT("Particles.SpriteAlignment")),
+			FNiagaraVariable(V4, TEXT("Particles.DynamicMaterialParameter")),
+			FNiagaraVariable(F, TEXT("Particles.RainDiameter")),
+			FNiagaraVariable(V4, TEXT("Particles.RainRand")),
+			FNiagaraVariable(F, TEXT("Particles.RainFrozen")),
+			FNiagaraVariable(F, TEXT("Particles.RainState")),
+			FNiagaraVariable(F, TEXT("Particles.RainTimer")),
+			FNiagaraVariable(V3, TEXT("Particles.RainDir")),
+		};
+	}
+
+	TArray<FString> RainAttributeDefaults()
+	{
+		TArray<FString> Defaults;
+		Defaults.SetNum(RainAttributes().Num());
+		return Defaults;
+	}
+
+	UNiagaraEmitter* BuildSplashEmitter(int32 Count, UMaterialInterface* Material, FString& Report)
+	{
+		const FString ModPath = RainRoot / TEXT("Niagara/Modules");
+		auto FillSplash = [](FString Text)
+		{
+			Text.ReplaceInline(TEXT("$(PER_SPLASH)"), TEXT("12"));
+			Text.ReplaceInline(TEXT("$(SEED)"), TEXT("2654435769"));
+			Text.ReplaceInline(TEXT("$(DENSITY)"), TEXT("1.0"));
+			return Text;
+		};
+		UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_SplashSpawn"), FillSplash(LoadParticleModule(TEXT("Niagara/HLSL/SplashSpawn.hlsl"))),
+			TEXT("Project Rain: splash droplet pool"), ParticleModuleMask);
+		UNiagaraScript* Update = CreateHlslModule(ModPath, TEXT("NM_SplashUpdate"), FillSplash(LoadParticleModule(TEXT("Niagara/HLSL/SplashUpdate.hlsl"))),
+			TEXT("Project Rain: ballistic splash droplets (Garg & Nayar 2007)"), ParticleModuleMask);
+		SaveAsset(Spawn);
+		SaveAsset(Update);
+
+		UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("Splash"), false);
+		FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+		D->SimTarget = ENiagaraSimTarget::GPUComputeSim;
+		D->bLocalSpace = false;
+		D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+		D->FixedBounds = RainBounds;
+		UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+		SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+		UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+		SetModuleInputInt(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, Burst, TEXT("Spawn Count"), Count);
+		LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+		AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, RainAttributes(), RainAttributeDefaults());
+		AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+
+		UNiagaraSpriteRendererProperties* Sprite = NewObject<UNiagaraSpriteRendererProperties>(Emitter, TEXT("SplashSprites"));
+		Sprite->Material = Material;
+		Sprite->Alignment = ENiagaraSpriteAlignment::CustomAlignment;
+		Sprite->FacingMode = ENiagaraSpriteFacingMode::FaceCamera;
+		Sprite->SortMode = ENiagaraSortMode::None;
+		Sprite->PixelCoverageMode = ENiagaraRendererPixelCoverageMode::Enabled_A;
+		Sprite->bCastShadows = false;
+		Emitter->AddRenderer(Sprite, D->Version.VersionGuid);
+		Report += FString::Printf(TEXT("Emitter Splash: %d droplets in clusters of 12 over the rain field\n"), Count);
+		return Emitter;
+	}
+
+	UNiagaraEmitter* BuildRainEmitter(int32 Count, const FRainDropConfig& C, UMaterialInterface* Material, FString& Report)
+	{
+		const FString ModPath = RainRoot / TEXT("Niagara/Modules");
+		UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_RainSpawn"),
+			Fill(LoadParticleModule(TEXT("Niagara/HLSL/RainSpawn.hlsl")), C), TEXT("Project Rain: spawn drops (Marshall-Palmer sizes, terminal velocity)"), ParticleModuleMask);
+		UNiagaraScript* Update = CreateHlslModule(ModPath, TEXT("NM_RainUpdate"),
+			Fill(LoadParticleModule(TEXT("Niagara/HLSL/RainUpdate.hlsl")), C), TEXT("Project Rain: fall / freeze / control / recycle"), ParticleModuleMask);
+		SaveAsset(Spawn);
+		SaveAsset(Update);
+
+		UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("Rain"), false);
+		FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+		D->SimTarget = ENiagaraSimTarget::GPUComputeSim;
+		D->bLocalSpace = false;
+		D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+		D->FixedBounds = RainBounds;
+
+		// Emitter: one burst at t=0, then never loop again.
+		UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+		SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+		UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+		SetModuleInputInt(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, Burst, TEXT("Spawn Count"), Count);
+		LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+
+		AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, RainAttributes(), RainAttributeDefaults());
+		AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+
+		UNiagaraSpriteRendererProperties* Sprite = NewObject<UNiagaraSpriteRendererProperties>(Emitter, TEXT("DropSprites"));
+		Sprite->Material = Material;
+		Sprite->Alignment = ENiagaraSpriteAlignment::CustomAlignment;
+		Sprite->FacingMode = ENiagaraSpriteFacingMode::FaceCamera;
+		Sprite->SortMode = ENiagaraSortMode::ViewDepth;
+		Sprite->bSortOnlyWhenTranslucent = true;
+		Sprite->PixelCoverageMode = ENiagaraRendererPixelCoverageMode::Enabled_A;
+		Sprite->PixelCoverageBlend = 1.0f;
+		Sprite->bCastShadows = false;
+		Emitter->AddRenderer(Sprite, D->Version.VersionGuid);
+
+		const float Volume = RainField.Cell * RainField.Cell * RainField.Height * 1e-6f;
+		Report += FString::Printf(TEXT("Emitter Rain: %d drops in a %.0f x %.0f x %.0f cm periodic window (%.0f drops/m^3)\n"),
+			Count, RainField.Cell, RainField.Cell, RainField.Height, Count / Volume);
+		return Emitter;
+	}
+}
+
+
+namespace
+{
+	UMaterial* BuildBasicMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_RainBasic"));
+		auto Vec = [M](const TCHAR* Name, FLinearColor Default, int32 Y)
+		{
+			UMaterialExpressionVectorParameter* P = AddExpr<UMaterialExpressionVectorParameter>(M, -400, Y);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		auto Scalar = [M](const TCHAR* Name, float Default, int32 Y)
+		{
+			UMaterialExpressionScalarParameter* P = AddExpr<UMaterialExpressionScalarParameter>(M, -400, Y);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		UMaterialEditingLibrary::ConnectMaterialProperty(Vec(TEXT("BaseColor"), FLinearColor(0.2f, 0.2f, 0.2f), 0), TEXT(""), MP_BaseColor);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Scalar(TEXT("Metallic"), 0.0f, 150), TEXT(""), MP_Metallic);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Scalar(TEXT("Roughness"), 0.5f, 250), TEXT(""), MP_Roughness);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Vec(TEXT("Emissive"), FLinearColor(0, 0, 0), 350), TEXT(""), MP_EmissiveColor);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+
+	UMaterial* BuildGroundMaterial(UMaterialParameterCollection* MPC, FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_WetGround"));
+		UMaterialExpressionCustom* Custom = AddExpr<UMaterialExpressionCustom>(M, -300, 0);
+		Custom->Description = TEXT("WetGround (Materials/HLSL/WetGround.hlsl)");
+		Custom->Code = LoadTextFile(TEXT("Materials/HLSL/WetGround.hlsl"));
+		Custom->OutputType = CMOT_Float3;
+		Custom->Inputs.Reset();
+		Custom->AdditionalOutputs.Reset();
+		FCustomOutput& OutCol = Custom->AdditionalOutputs.AddDefaulted_GetRef();
+		OutCol.OutputName = TEXT("BaseCol");
+		OutCol.OutputType = CMOT_Float3;
+		FCustomOutput& OutRough = Custom->AdditionalOutputs.AddDefaulted_GetRef();
+		OutRough.OutputName = TEXT("RoughOut");
+		OutRough.OutputType = CMOT_Float1;
+
+		UMaterialExpressionTime* Time = AddExpr<UMaterialExpressionTime>(M, -700, -100);
+		FCustomInput& InTime = Custom->Inputs.AddDefaulted_GetRef();
+		InTime.InputName = TEXT("Time");
+		InTime.Input.Connect(0, Time);
+		auto AddCollection = [&](const TCHAR* InputName, const TCHAR* Param, int32 Y)
+		{
+			UMaterialExpressionCollectionParameter* P = AddExpr<UMaterialExpressionCollectionParameter>(M, -700, Y);
+			P->Collection = MPC;
+			P->ParameterName = Param;
+			P->ParameterId = MPC->GetParameterId(Param);
+			FCustomInput& In = Custom->Inputs.AddDefaulted_GetRef();
+			In.InputName = InputName;
+			In.Input.Connect(0, P);
+		};
+		AddCollection(TEXT("Rain"), TEXT("RainIntensity"), 0);
+		AddCollection(TEXT("Wet"), TEXT("Wetness"), 100);
+		Custom->RebuildOutputs();
+
+		M->GetEditorOnlyData()->Normal.Connect(0, Custom);
+		M->GetEditorOnlyData()->BaseColor.Connect(1, Custom);
+		M->GetEditorOnlyData()->Roughness.Connect(2, Custom);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+}
+
+FString URainBuilderLibrary::BuildStageMaterials()
+{
+	FString Report;
+	UMaterialParameterCollection* MPC = LoadObject<UMaterialParameterCollection>(nullptr, *(RainRoot / TEXT("Materials/MPC_Rain.MPC_Rain")));
+	if (!MPC)
+	{
+		return TEXT("FAILED: run BuildRainAssets first (MPC_Rain missing)");
+	}
+	BuildBasicMaterial(Report);
+	BuildGroundMaterial(MPC, Report);
+	return Report;
+}
+
+FString URainBuilderLibrary::BuildRainAssets(int32 RainCount, int32 SplashCount)
+{
+	FString Report;
+	UMaterialParameterCollection* MPC = BuildCollection();
+	UTextureRenderTargetCube* Env = BuildEnvCube();
+	UMaterial* DropMaterial = BuildDropMaterial(MPC, Env, Report);
+
+	UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), TEXT("NS_RainMagic"));
+	AddRainUserParameters(System);
+
+	// One rain: a single emitter, one density and one drop-size distribution everywhere. Near and far,
+	// big and small on screen, come from perspective alone.
+	if (RainCount > 0)
+	{
+		UNiagaraEmitter* Emitter = BuildRainEmitter(RainCount, FRainDropConfig(), DropMaterial, Report);
+		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
+	}
+	if (SplashCount > 0)
+	{
+		UNiagaraEmitter* Splash = BuildSplashEmitter(SplashCount, DropMaterial, Report);
+		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Splash, Splash->GetExposedVersion().VersionGuid, true);
+	}
+
+	const bool bOk = CompileAndReport(System, Report);
+	SaveAsset(System);
+
+	// Point any NS_RainMagic actors in the open level at the freshly built system.
+	if (GEditor)
+	{
+		if (UWorld* World = GEditor->GetEditorWorldContext().World())
+		{
+			for (TActorIterator<ANiagaraActor> It(World); It; ++It)
+			{
+				UNiagaraComponent* NC = It->GetNiagaraComponent();
+				if (NC && NC->GetAsset() && NC->GetAsset()->GetName().StartsWith(TEXT("NS_RainMagic")))
+				{
+					NC->SetAsset(System);
+					NC->ResetSystem();
+					Report += FString::Printf(TEXT("Rebound %s\n"), *It->GetActorLabel());
+				}
+			}
+		}
+	}
+	return FString::Printf(TEXT("%s\n%s"), bOk ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
+}
+
+void RainAuthoring::AddRainUserParameters(UNiagaraSystem* System)
+{
+	for (const FUserParamDefault& P : RainUserParameters())
+	{
+		FNiagaraVariable Var(P.Type, *(FString(TEXT("User.")) + P.Name));
+		Var.AllocateData();
+		if (P.Type == FNiagaraTypeDefinition::GetFloatDef())
+		{
+			Var.SetValue(P.Value.X);
+		}
+		else if (P.Type == FNiagaraTypeDefinition::GetVec4Def())
+		{
+			Var.SetValue(P.Value);
+		}
+		else
+		{
+			Var.SetValue(FVector3f(P.Value.X, P.Value.Y, P.Value.Z));
+		}
+		AddUserParameter(System, Var);
+	}
+}

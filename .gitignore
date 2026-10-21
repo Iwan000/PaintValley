@@ -1,0 +1,14 @@
+# Unreal build products and caches
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.xcworkspace
+*.xcodeproj
+
+# Python caches, macOS metadata
+__pycache__/
+.DS_Store
+
+# Rendered movies are large and already named per version (v6, v7, v8, ...); sheets and stills are kept.
+Renders/*.mp4
