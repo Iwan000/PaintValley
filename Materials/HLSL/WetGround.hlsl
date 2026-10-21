@@ -1,13 +1,18 @@
 // =====================================================================================
 // Project Rain - wet stone pavement with puddles and rain ripples (material Custom node).
-// Returns the tangent-space normal (float3); additional outputs BaseCol (float3) and RoughOut (float).
+// Returns the tangent-space normal (float3); additional outputs BaseCol (float3), RoughOut (float), EmisOut
+// (float3) and SpecOut (float).
 //
 // Wet surface model after Lagarde ("Water drop 3b"): porous darkening, glossier wet film,
 // puddles flatten the normal and become mirror-like. Ripples: 4 layers of procedural rings
 // (Lagarde "Water drop 2b": per-layer time multipliers 1, .85, .93, 1.13, offsets 0,.2,.45,.7).
 // Ripple strength follows MPC RainIntensity, so puddles go glassy-still when the rain is frozen.
+// The camera's lens (MPC Lens: blur disc at infinity in radians, focus distance, pixels per radian) blurs the
+// pavement like the drops and the backdrop: out of focus, its fine detail averages out over the blur disc,
+// and at the horizon, where it meets the backdrop, the two blur into each other.
 //
-// Inputs: Time(float) Rain(float 0..1, MPC RainIntensity) Wet(float 0..1, MPC Wetness)
+// Inputs: Time(float) Rain(float 0..1, MPC RainIntensity) Wet(float 0..1, MPC Wetness) Lens(float4, MPC Lens)
+//         Env(TextureCube: the stage's environment cube, with the backdrop in it)
 // =====================================================================================
 struct FPrGround
 {
@@ -97,6 +102,13 @@ float2 StoneN = float2(H0 - Hx, H0 - Hy) * 1.6 * (1.0 - Puddle);
 float2 RippleN = G.Ripples(P, Time, Rain) * lerp(0.35, 1.0, Puddle);
 float2 Nxy = StoneN + RippleN;
 
+// Lens blur here (thin lens: a blur disc of Lens.x |1 - focus / distance| radians), in pixels. Out of focus
+// the relief and ripples flatten and the tones go to the pavement's mean (the wet film still mirrors the lights).
+float CamD = length(GetTranslatedWorldPosition(Parameters) - ResolvedView.TranslatedWorldCameraOrigin);
+float BlurPx = Lens.x * abs(1.0 - Lens.y / max(CamD, 1.0)) * Lens.z;
+float Sharp = 1.0 - smoothstep(1.0, 6.0, BlurPx);
+Nxy *= Sharp;
+
 // Roughness: dry stone 0.65, wet film 0.18, puddle 0.03.
 float Rough = lerp(0.65, 0.18, Wet);
 Rough = lerp(Rough, 0.03, Puddle);
@@ -108,6 +120,21 @@ float3 Stone = lerp(float3(0.13, 0.125, 0.115), float3(0.21, 0.195, 0.175), Ston
 Stone *= lerp(1.0, 0.52, Wet);
 Stone *= lerp(1.0, 0.55, Puddle);
 Stone *= lerp(1.0, 0.6, Joint);
-BaseCol = Stone;
+// The mean of the pavement's tones (wet stone, ~30% puddles, joints).
+float3 MeanStone = float3(0.074, 0.069, 0.063) * lerp(1.0, 0.52, Wet) / 0.52;
+BaseCol = lerp(MeanStone, Stone, Sharp);
 RoughOut = saturate(Rough);
+
+// The horizon: a pixel whose blur disc (radius: half the lens blur, at least a pixel) reaches above the line
+// where the pavement meets the backdrop shows that share of the backdrop (read blurred, just above the line).
+// The wet film's grazing mirror image of the lit horizon is a line a few pixels thin that the blur would
+// spread out: within the blur radius it gives way to the blurred horizon as well.
+float3 ViewDir = (GetTranslatedWorldPosition(Parameters) - ResolvedView.TranslatedWorldCameraOrigin) / max(CamD, 1.0);
+float BlurRad = 0.5 * Lens.x * abs(1.0 - Lens.y / max(CamD, 1.0)) + 1.0 / max(Lens.z, 1.0);
+float Below = max(-ViewDir.z, 0.0) / BlurRad;
+float Mix = saturate(0.5 * (1.0 - Below));
+float3 Horizon = Env.SampleLevel(EnvSampler, normalize(float3(ViewDir.xy, BlurRad)), log2(max(BlurRad / (1.5707963 / 512.0), 1.0))).rgb;
+EmisOut = Horizon * Mix;
+BaseCol *= 1.0 - Mix;
+SpecOut = 0.5 * saturate(Below);
 return normalize(float3(Nxy, 1.0));

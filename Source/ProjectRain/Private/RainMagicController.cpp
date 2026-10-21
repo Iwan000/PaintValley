@@ -2,8 +2,8 @@
 
 #include "Components/LightComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/SpotLightComponent.h"
 #include "Components/SceneCaptureComponentCube.h"
-#include "Engine/PostProcessVolume.h"
 #include "Engine/SceneCaptureCube.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -269,18 +269,6 @@ FVector ARainMagicController::ScriptedHand(float T) const
 	return Chest + Offset;
 }
 
-float ARainMagicController::StrobeGain(float SinceStop) const
-{
-	if (!bStrobe)
-	{
-		return 1.0f;
-	}
-	// The stop brightens the frame (strobes add light), then it flickers 2 frames bright / 2 dark.
-	const float Base = 1.15f;
-	const bool bBright = FMath::Frac(SinceStop * StrobeHz) < 0.5f;
-	return bBright ? Base * StrobeRatio : Base;
-}
-
 // ---------------------------------------------------------------------------------------------- state
 
 FRainTrickState ARainMagicController::PerformanceState(float T) const
@@ -293,7 +281,6 @@ FRainTrickState ARainMagicController::PerformanceState(float T) const
 	S.Chaos = SmoothStep01(ChaosAt, ChaosAt + 1.5f, T) * (1.0f - SmoothStep01(ChaosEnd - 1.5f, ChaosEnd, T));
 	S.LiftTime = (T >= LiftAt && T < ResumeAt) ? T - LiftAt : -1.0f;
 	S.Raining = 1.0f - SmoothStep01(StopAt, StopAt + 0.3f, T) * (1.0f - SmoothStep01(ResumeAt + 0.5f, ResumeAt + 2.5f, T));
-	S.Strobe = (T >= StopAt && T <= ResumeAt + 1.2f) ? StrobeGain(T - StopAt) : 1.0f;
 	S.Hand = ScriptedHand(T);
 	// Gentle nudge while presenting (drops part around the hand, they are not swept away); strong
 	// only while conducting the chaos.
@@ -310,7 +297,6 @@ FRainTrickState ARainMagicController::PlayerState() const
 	S.Chaos = PlayerChaos;
 	S.LiftTime = bPlayerHeld ? PlayerLiftTime : -1.0f;
 	S.Raining = bPlayerHeld ? 1.0f - SmoothStep01(0.0f, 0.3f, PlayerClock) : SmoothStep01(0.5f, 2.5f, PlayerClock);
-	S.Strobe = (bPlayerHeld || PlayerClock < 1.2f) ? StrobeGain(PlayerClock) : 1.0f;
 	// The magician holds the presenting pose; the player's hands are the push and the brush.
 	S.Hand = ScriptedHand(HoverAt);
 	S.HandStrength = 0.0f;
@@ -438,6 +424,16 @@ void ARainMagicController::HandleInteractiveInput()
 	if (PC->WasInputKeyJustPressed(EKeys::Six)) JumpToBeat(ERainBeat::Resume);
 	if (PC->WasInputKeyJustPressed(EKeys::P)) bPaused = !bPaused;
 	if (PC->WasInputKeyJustPressed(EKeys::H)) bShowHelp = !bShowHelp;
+	// V: the next framing. The rain field and the lens follow the view camera.
+	if (PC->WasInputKeyJustPressed(EKeys::V) && ShowcaseCameras.Num() > 0)
+	{
+		const int32 Index = ShowcaseCameras.Find(ViewCamera);
+		if (AActor* Next = ShowcaseCameras[(Index + 1) % ShowcaseCameras.Num()])
+		{
+			ViewCamera = Next;
+			PC->SetViewTarget(ViewCamera);
+		}
+	}
 
 	// The player's trick.
 	if (PC->WasInputKeyJustPressed(EKeys::SpaceBar))
@@ -496,7 +492,7 @@ void ARainMagicController::ShowHelp() const
 	}
 	GEngine->AddOnScreenDebugMessage(0x5241494E01ull, 0.0f, FColor(200, 220, 255), Status);
 	GEngine->AddOnScreenDebugMessage(0x5241494E02ull, 0.0f, FColor(150, 160, 180),
-		TEXT("Space hold/release   WASD + Q/E push   LMB drag: brush   C chaos   R rise   1-6 performance   P pause   H hide"));
+		TEXT("Space hold/release   WASD + Q/E push   LMB drag: brush   C chaos   R rise   1-6 performance   V camera   P pause   H hide"));
 }
 
 // ---------------------------------------------------------------------------------------------- output
@@ -520,8 +516,11 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 	Inst->SetVectorParameterValue(TEXT("SkyGlow"), SkyGlow);
 	for (int32 i = 0; i < 6; ++i)
 	{
+		// P: position, soft radius. C: colour * glint brightness, cos of the inner cone. D: spot axis, cos of the
+		// outer cone (point lamps: no cone).
 		FLinearColor P(0, 0, -100000, 50);
-		FLinearColor C(0, 0, 0, 0);
+		FLinearColor C(0, 0, 0, -1);
+		FLinearColor D(0, 0, 0, -2);
 		if (GlintLights.IsValidIndex(i) && GlintLights[i])
 		{
 			if (ULightComponent* Light = GlintLights[i]->FindComponentByClass<ULightComponent>())
@@ -533,16 +532,25 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 					Radius = FMath::Max(Point->SourceRadius, 5.0f);
 				}
 				P = FLinearColor(L.X, L.Y, L.Z, Radius);
-				const float Bright = Light->bAffectsWorld && Light->IsVisible() ? Light->Intensity * GlintPerCandela * State.Strobe : 0.0f;
+				const float Bright = Light->bAffectsWorld && Light->IsVisible() ? Light->Intensity * GlintPerCandela : 0.0f;
 				C = Light->GetLightColor() * Bright;
+				C.A = -1.0f;
+				if (const USpotLightComponent* Spot = Cast<USpotLightComponent>(Light))
+				{
+					const FVector Axis = Spot->GetForwardVector();
+					D = FLinearColor(Axis.X, Axis.Y, Axis.Z, FMath::Cos(FMath::DegreesToRadians(Spot->OuterConeAngle)));
+					C.A = FMath::Cos(FMath::DegreesToRadians(FMath::Min(Spot->InnerConeAngle, Spot->OuterConeAngle - 0.5f)));
+				}
 			}
 		}
 		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dP"), i), P);
 		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dC"), i), C);
+		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dD"), i), D);
 		if (NC)
 		{
 			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dP"), i), FVector4(P.R, P.G, P.B, P.A));
-			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dC"), i), FVector4(C.R * ScatterGain, C.G * ScatterGain, C.B * ScatterGain, 0.0));
+			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dC"), i), FVector4(C.R * ScatterGain, C.G * ScatterGain, C.B * ScatterGain, C.A));
+			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dD"), i), FVector4(D.R, D.G, D.B, D.A));
 		}
 	}
 	if (NC)
@@ -553,17 +561,29 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 		NC->SetVariableFloat(TEXT("RainViewTan"), View.TanHalfFov);
 		NC->SetVariableFloat(TEXT("RainPixelScale"), View.PixelScale);
 		NC->SetVariableFloat(TEXT("RainFrozenSizeScale"), FrozenSizeScale);
-		if (UCineCameraComponent* Cine = GetActiveCineCamera())
-		{
-			// Aperture diameter in cm = focal length (mm) / f-number / 10. A cine camera that has not ticked
-			// yet (e.g. just spawned in the editor) reports a focus distance of 0: use its manual focus.
-			const float Focus = Cine->CurrentFocusDistance > 0.0f ? Cine->CurrentFocusDistance : Cine->FocusSettings.ManualFocusDistance;
-			NC->SetVariableFloat(TEXT("RainFocusDist"), FMath::Max(Focus, 10.0f));
-			NC->SetVariableFloat(TEXT("RainAperture"), Cine->CurrentFocalLength / FMath::Max(Cine->CurrentAperture, 0.5f) / 10.0f);
-		}
+		NC->SetVariableFloat(TEXT("RainLobe"), ScatterLobe);
 		NC->SetVariableFloat(TEXT("RainDofScale"), DofScale);
 		NC->SetVariableVec3(TEXT("RainAmbient"), FVector(AmbientDrop.R, AmbientDrop.G, AmbientDrop.B));
 	}
+	float BackdropBlur = 0.0f;
+	float LensFocus = 1000.0f;
+	if (UCineCameraComponent* Cine = GetActiveCineCamera())
+	{
+		// Aperture diameter in cm = focal length (mm) / f-number / 10. A cine camera that has not ticked
+		// yet (e.g. just spawned in the editor) reports a focus distance of 0: use its manual focus.
+		const float Focus = FMath::Max(Cine->CurrentFocusDistance > 0.0f ? Cine->CurrentFocusDistance : Cine->FocusSettings.ManualFocusDistance, 10.0f);
+		const float Aperture = Cine->CurrentFocalLength / FMath::Max(Cine->CurrentAperture, 0.5f) / 10.0f;
+		// Things at infinity blur to a disc of aperture / focus distance radians (the night backdrop).
+		BackdropBlur = Aperture / Focus * DofScale;
+		LensFocus = Focus;
+		if (NC)
+		{
+			NC->SetVariableFloat(TEXT("RainFocusDist"), Focus);
+			NC->SetVariableFloat(TEXT("RainAperture"), Aperture);
+		}
+	}
+	// The same lens for the opaque stage (backdrop, pavement): Materials/HLSL/NightSky.hlsl, WetGround.hlsl.
+	Inst->SetVectorParameterValue(TEXT("Lens"), FLinearColor(BackdropBlur, LensFocus, View.PixelScale, 0.0f));
 }
 
 void ARainMagicController::ApplyState(float DeltaSeconds, const FRainView& View)
@@ -602,17 +622,11 @@ void ARainMagicController::ApplyState(float DeltaSeconds, const FRainView& View)
 		NC->SetVariableFloat(TEXT("RainSplash"), State.Raining);
 	}
 
-	if (StrobeVolume)
-	{
-		StrobeVolume->Settings.bOverride_ColorGain = true;
-		StrobeVolume->Settings.ColorGain = FVector4(State.Strobe, State.Strobe, State.Strobe, 1.0f);
-	}
 	if (UWorld* World = GetWorld())
 	{
 		if (UMaterialParameterCollectionInstance* Inst = Collection ? World->GetParameterCollectionInstance(Collection) : nullptr)
 		{
 			Inst->SetScalarParameterValue(TEXT("RainIntensity"), State.Raining);
-			Inst->SetScalarParameterValue(TEXT("Strobe"), State.Strobe);
 		}
 	}
 	PushLightsAndCamera(View);

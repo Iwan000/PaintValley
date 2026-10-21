@@ -50,7 +50,9 @@ namespace
 
 	// The rain field (Niagara/HLSL/RainField.hlsl): one 16 m x 16 m period of an infinite periodic rain,
 	// 6 m deep, kept in front of the camera with the camera 1.5 m inside its back edge. Drops are visible
-	// out to ~14 m and fade out over the last 6 m. Lifted drops are parked at 24 m.
+	// out to ~14 m and fade out over the last 6 m. Lifted drops are parked at 24 m. The stage rain (rain
+	// towers over the performance area) thins out as a Gaussian of sigma 2.5 m around the stage centre,
+	// cut at 6 m (inside half a period).
 	struct FRainField
 	{
 		float Cell = 1600.0f;
@@ -58,6 +60,8 @@ namespace
 		float Height = 600.0f;
 		float FarFade = 600.0f;
 		float ParkHeight = 2400.0f;
+		float StageSigma = 250.0f;
+		float StageRadius = 600.0f;
 	};
 	const FRainField RainField;
 
@@ -71,6 +75,8 @@ namespace
 		Text.ReplaceInline(TEXT("$(HEIGHT)"), *F(RainField.Height));
 		Text.ReplaceInline(TEXT("$(FAR_FADE)"), *F(RainField.FarFade));
 		Text.ReplaceInline(TEXT("$(PARK_HEIGHT)"), *F(RainField.ParkHeight));
+		Text.ReplaceInline(TEXT("$(STAGE_SIGMA)"), *F(RainField.StageSigma));
+		Text.ReplaceInline(TEXT("$(STAGE_RADIUS)"), *F(RainField.StageRadius));
 		return Text;
 	}
 
@@ -155,18 +161,23 @@ namespace
 			bChanged = true;
 		};
 		AddVector(TEXT("CamPos"), FLinearColor(0, -800, 170, 0));
-		// x env gain, y glint gain, z falling-streak gain, w exposure (strobe multiplies this)
+		// x env gain, y glint gain, z falling-streak gain, w exposure
 		AddVector(TEXT("Look"), FLinearColor(1.0f, 1.0f, 4.0f, 1.0f));
 		for (int32 i = 0; i < NumStageLights; ++i)
 		{
 			AddVector(*FString::Printf(TEXT("L%dP"), i), FLinearColor(0, 0, -100000, 50));
-			AddVector(*FString::Printf(TEXT("L%dC"), i), FLinearColor(0, 0, 0, 0));
+			// rgb: colour * intensity, a: cos of the spot's inner cone (-1 for a point lamp)
+			AddVector(*FString::Printf(TEXT("L%dC"), i), FLinearColor(0, 0, 0, -1));
+			// rgb: spot axis, a: cos of the outer cone (-2 for a point lamp: no cone)
+			AddVector(*FString::Printf(TEXT("L%dD"), i), FLinearColor(0, 0, 0, -2));
 		}
+		// The camera's lens for the opaque stage (the drops are blurred in Niagara): x blur disc of things at
+		// infinity (radians, aperture / focus distance), y focus distance (cm), z pixels per radian.
+		AddVector(TEXT("Lens"), FLinearColor(0.0f, 650.0f, 2700.0f, 0.0f));
 		// Radiance of the night sky's glow above the horizon, seen in the drops' ball lenses.
 		AddVector(TEXT("SkyGlow"), FLinearColor(0.08f, 0.088f, 0.104f, 0.0f));
 		AddScalar(TEXT("Wetness"), 1.0f);
 		AddScalar(TEXT("RainIntensity"), 1.0f);
-		AddScalar(TEXT("Strobe"), 1.0f);
 		if (bCreated)
 		{
 			FAssetRegistryModule::AssetCreated(MPC);
@@ -241,6 +252,11 @@ namespace
 		AddInput(TEXT("DynZ"), Dyn, 2);
 		AddInput(TEXT("DynW"), Dyn, 3);
 
+		UMaterialExpressionDynamicParameter* DynOne = AddExpr<UMaterialExpressionDynamicParameter>(M, -900, Y += 160);
+		DynOne->ParameterIndex = 1;
+		DynOne->ParamNames = { TEXT("BeadRatio"), TEXT("Unused1"), TEXT("Unused2"), TEXT("Unused3") };
+		AddInput(TEXT("DynOneX"), DynOne, 0);
+
 		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -900, Y += 160);
 		AddInput(TEXT("PCol"), PColor, 5); // RGBA (outputs: RGB, R, G, B, A, RGBA)
 
@@ -273,6 +289,10 @@ namespace
 		{
 			AddCollectionInput(*FString::Printf(TEXT("L%dC"), i));
 		}
+		for (int32 i = 0; i < NumStageLights; ++i)
+		{
+			AddCollectionInput(*FString::Printf(TEXT("L%dD"), i));
+		}
 
 		UMaterialExpressionComponentMask* RGB = AddExpr<UMaterialExpressionComponentMask>(M, 0, -60);
 		RGB->R = RGB->G = RGB->B = true;
@@ -300,6 +320,10 @@ namespace
 		float DMinMm = 1.0f;
 		float DMaxMm = 6.0f;
 		int32 Seed = 29;
+		// Stage rain (rain machines): how many of the drops, and their bigger sizes (mean ~3.6 mm).
+		int32 StageCount = 0;
+		float StageLambdaScale = 0.3f;
+		float StageDMinMm = 2.0f;
 	};
 
 	FString Fill(FString Text, const FRainDropConfig& C)
@@ -310,6 +334,9 @@ namespace
 		Text.ReplaceInline(TEXT("$(LAMBDA_SCALE)"), *F(C.LambdaScale));
 		Text.ReplaceInline(TEXT("$(D_MIN_MM)"), *F(C.DMinMm));
 		Text.ReplaceInline(TEXT("$(D_MAX_MM)"), *F(C.DMaxMm));
+		Text.ReplaceInline(TEXT("$(STAGE_COUNT)"), *FString::Printf(TEXT("%d"), C.StageCount));
+		Text.ReplaceInline(TEXT("$(STAGE_LAMBDA_SCALE)"), *F(C.StageLambdaScale));
+		Text.ReplaceInline(TEXT("$(STAGE_D_MIN_MM)"), *F(C.StageDMinMm));
 		return Text;
 	}
 
@@ -369,13 +396,14 @@ namespace
 			{ TEXT("RainLodPixels"), F, FVector4f(2.5f) },
 			{ TEXT("RainAmbient"), V, FVector4f(0.01f, 0.012f, 0.015f, 0) },
 			{ TEXT("RainForward"), F, FVector4f(1.0f) },
+			{ TEXT("RainLobe"), F, FVector4f(0.15f) },
 			{ TEXT("RainSide"), F, FVector4f(0.003f) },
-			{ TEXT("RainL0P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL0C"), V4, FVector4f(0) },
-			{ TEXT("RainL1P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL1C"), V4, FVector4f(0) },
-			{ TEXT("RainL2P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL2C"), V4, FVector4f(0) },
-			{ TEXT("RainL3P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL3C"), V4, FVector4f(0) },
-			{ TEXT("RainL4P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL4C"), V4, FVector4f(0) },
-			{ TEXT("RainL5P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL5C"), V4, FVector4f(0) },
+			{ TEXT("RainL0P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL0C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL0D"), V4, FVector4f(0, 0, 0, -2) },
+			{ TEXT("RainL1P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL1C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL1D"), V4, FVector4f(0, 0, 0, -2) },
+			{ TEXT("RainL2P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL2C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL2D"), V4, FVector4f(0, 0, 0, -2) },
+			{ TEXT("RainL3P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL3C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL3D"), V4, FVector4f(0, 0, 0, -2) },
+			{ TEXT("RainL4P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL4C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL4D"), V4, FVector4f(0, 0, 0, -2) },
+			{ TEXT("RainL5P"), V4, FVector4f(0, 0, -100000, 50) }, { TEXT("RainL5C"), V4, FVector4f(0, 0, 0, -1) }, { TEXT("RainL5D"), V4, FVector4f(0, 0, 0, -2) },
 		};
 	}
 
@@ -393,12 +421,14 @@ namespace
 			FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.SpriteSize")),
 			FNiagaraVariable(V3, TEXT("Particles.SpriteAlignment")),
 			FNiagaraVariable(V4, TEXT("Particles.DynamicMaterialParameter")),
+			FNiagaraVariable(V4, TEXT("Particles.DynamicMaterialParameter1")),
 			FNiagaraVariable(F, TEXT("Particles.RainDiameter")),
 			FNiagaraVariable(V4, TEXT("Particles.RainRand")),
 			FNiagaraVariable(F, TEXT("Particles.RainFrozen")),
 			FNiagaraVariable(F, TEXT("Particles.RainState")),
 			FNiagaraVariable(F, TEXT("Particles.RainTimer")),
 			FNiagaraVariable(V3, TEXT("Particles.RainDir")),
+			FNiagaraVariable(F, TEXT("Particles.RainStage")),
 		};
 	}
 
@@ -409,14 +439,16 @@ namespace
 		return Defaults;
 	}
 
-	UNiagaraEmitter* BuildSplashEmitter(int32 Count, UMaterialInterface* Material, FString& Report)
+	// StageShare: the share of the impacts that fall on the stage (its drops are fewer but bigger and faster).
+	UNiagaraEmitter* BuildSplashEmitter(int32 Count, float StageShare, UMaterialInterface* Material, FString& Report)
 	{
 		const FString ModPath = RainRoot / TEXT("Niagara/Modules");
-		auto FillSplash = [](FString Text)
+		auto FillSplash = [StageShare](FString Text)
 		{
 			Text.ReplaceInline(TEXT("$(PER_SPLASH)"), TEXT("12"));
 			Text.ReplaceInline(TEXT("$(SEED)"), TEXT("2654435769"));
 			Text.ReplaceInline(TEXT("$(DENSITY)"), TEXT("1.0"));
+			Text.ReplaceInline(TEXT("$(STAGE_SPLASH_SHARE)"), *FString::Printf(TEXT("%.4f"), StageShare));
 			return Text;
 		};
 		UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_SplashSpawn"), FillSplash(LoadParticleModule(TEXT("Niagara/HLSL/SplashSpawn.hlsl"))),
@@ -493,8 +525,11 @@ namespace
 		Emitter->AddRenderer(Sprite, D->Version.VersionGuid);
 
 		const float Volume = RainField.Cell * RainField.Cell * RainField.Height * 1e-6f;
-		Report += FString::Printf(TEXT("Emitter Rain: %d drops in a %.0f x %.0f x %.0f cm periodic window (%.0f drops/m^3)\n"),
-			Count, RainField.Cell, RainField.Cell, RainField.Height, Count / Volume);
+		// Peak of the stage's Gaussian column (per m^3), truncated at StageRadius.
+		const float S2 = FMath::Square(RainField.StageSigma * 0.01f);
+		const float StagePeak = C.StageCount / (2.0f * PI * S2 * (1.0f - FMath::Exp(-0.5f * FMath::Square(RainField.StageRadius * 0.01f) / S2)) * RainField.Height * 0.01f);
+		Report += FString::Printf(TEXT("Emitter Rain: %d drops: %d in a %.0f x %.0f x %.0f cm periodic window (%.0f drops/m^3) + %d stage drops (%.0f drops/m^3 at the centre)\n"),
+			Count, Count - C.StageCount, RainField.Cell, RainField.Cell, RainField.Height, (Count - C.StageCount) / Volume, C.StageCount, StagePeak);
 		return Emitter;
 	}
 }
@@ -542,6 +577,12 @@ namespace
 		FCustomOutput& OutRough = Custom->AdditionalOutputs.AddDefaulted_GetRef();
 		OutRough.OutputName = TEXT("RoughOut");
 		OutRough.OutputType = CMOT_Float1;
+		FCustomOutput& OutEmis = Custom->AdditionalOutputs.AddDefaulted_GetRef();
+		OutEmis.OutputName = TEXT("EmisOut");
+		OutEmis.OutputType = CMOT_Float3;
+		FCustomOutput& OutSpec = Custom->AdditionalOutputs.AddDefaulted_GetRef();
+		OutSpec.OutputName = TEXT("SpecOut");
+		OutSpec.OutputType = CMOT_Float1;
 
 		UMaterialExpressionTime* Time = AddExpr<UMaterialExpressionTime>(M, -700, -100);
 		FCustomInput& InTime = Custom->Inputs.AddDefaulted_GetRef();
@@ -559,18 +600,30 @@ namespace
 		};
 		AddCollection(TEXT("Rain"), TEXT("RainIntensity"), 0);
 		AddCollection(TEXT("Wet"), TEXT("Wetness"), 100);
+		AddCollection(TEXT("Lens"), TEXT("Lens"), 200);
+		// The stage's environment cube (RT_RainEnv, it holds the backdrop): what the pavement blends into at the horizon.
+		UMaterialExpressionTextureObjectParameter* Env = AddExpr<UMaterialExpressionTextureObjectParameter>(M, -700, 300);
+		Env->ParameterName = TEXT("EnvCube");
+		Env->Texture = LoadObject<UTextureRenderTargetCube>(nullptr, *(RainRoot / TEXT("Materials/RT_RainEnv.RT_RainEnv")));
+		Env->SamplerType = SAMPLERTYPE_Color;
+		FCustomInput& InEnv = Custom->Inputs.AddDefaulted_GetRef();
+		InEnv.InputName = TEXT("Env");
+		InEnv.Input.Connect(0, Env);
 		Custom->RebuildOutputs();
 
 		M->GetEditorOnlyData()->Normal.Connect(0, Custom);
 		M->GetEditorOnlyData()->BaseColor.Connect(1, Custom);
 		M->GetEditorOnlyData()->Roughness.Connect(2, Custom);
+		M->GetEditorOnlyData()->EmissiveColor.Connect(3, Custom);
+		M->GetEditorOnlyData()->Specular.Connect(4, Custom);
 		CompileMaterialAndReport(M, Report);
 		return M;
 	}
 
 	// The night backdrop on the sky dome (Materials/HLSL/NightSky.hlsl): the imported HDR panorama
-	// (Scripts/import_backdrop.py) at infinity, with Exposure and Yaw parameters for the stage.
-	UMaterial* BuildNightSkyMaterial(FString& Report)
+	// (Scripts/import_backdrop.py) at infinity, with Exposure and Yaw parameters for the stage, blurred by
+	// the camera's lens (MPC Lens).
+	UMaterial* BuildNightSkyMaterial(UMaterialParameterCollection* MPC, FString& Report)
 	{
 		UTextureCube* Panorama = LoadObject<UTextureCube>(nullptr, *(RainRoot / TEXT("Environment/T_NightSky.T_NightSky")), nullptr, LOAD_NoWarn | LOAD_Quiet);
 		if (!Panorama)
@@ -587,7 +640,7 @@ namespace
 
 		UMaterialExpressionCustom* Custom = AddExpr<UMaterialExpressionCustom>(M, -300, 0);
 		Custom->Description = TEXT("NightSky (Materials/HLSL/NightSky.hlsl)");
-		Custom->Code = LoadTextFile(TEXT("Materials/HLSL/NightSky.hlsl"));
+		Custom->Code = LoadTextFile(TEXT("Materials/HLSL/NightSky.hlsl")).Replace(TEXT("$(FACE_SIZE)"), *FString::Printf(TEXT("%d.0"), Panorama->GetSizeX()));
 		Custom->OutputType = CMOT_Float3;
 		Custom->Inputs.Reset();
 		auto AddInput = [Custom](const TCHAR* Name, UMaterialExpression* From)
@@ -596,7 +649,6 @@ namespace
 			In.InputName = Name;
 			In.Input.Connect(0, From);
 		};
-		AddInput(TEXT("CamVec"), AddExpr<UMaterialExpressionCameraVectorWS>(M, -700, -200));
 		UMaterialExpressionTextureObjectParameter* Sky = AddExpr<UMaterialExpressionTextureObjectParameter>(M, -700, -100);
 		Sky->ParameterName = TEXT("Sky");
 		Sky->Texture = Panorama;
@@ -610,6 +662,20 @@ namespace
 		Yaw->ParameterName = TEXT("Yaw");
 		Yaw->DefaultValue = 0.0f;
 		AddInput(TEXT("YawDeg"), Yaw);
+		UMaterialExpressionCollectionParameter* Lens = AddExpr<UMaterialExpressionCollectionParameter>(M, -700, 200);
+		Lens->Collection = MPC;
+		Lens->ParameterName = TEXT("Lens");
+		Lens->ParameterId = MPC->GetParameterId(TEXT("Lens"));
+		AddInput(TEXT("Lens"), Lens);
+		UMaterialExpressionCollectionParameter* CamPos = AddExpr<UMaterialExpressionCollectionParameter>(M, -700, 300);
+		CamPos->Collection = MPC;
+		CamPos->ParameterName = TEXT("CamPos");
+		CamPos->ParameterId = MPC->GetParameterId(TEXT("CamPos"));
+		AddInput(TEXT("CamW"), CamPos);
+		UMaterialExpressionScalarParameter* GroundZ = AddExpr<UMaterialExpressionScalarParameter>(M, -700, 400);
+		GroundZ->ParameterName = TEXT("GroundZ");
+		GroundZ->DefaultValue = 0.0f;
+		AddInput(TEXT("GroundZ"), GroundZ);
 
 		M->GetEditorOnlyData()->EmissiveColor.Connect(0, Custom);
 		CompileMaterialAndReport(M, Report);
@@ -627,11 +693,11 @@ FString URainBuilderLibrary::BuildStageMaterials()
 	}
 	BuildBasicMaterial(Report);
 	BuildGroundMaterial(MPC, Report);
-	BuildNightSkyMaterial(Report);
+	BuildNightSkyMaterial(MPC, Report);
 	return Report;
 }
 
-FString URainBuilderLibrary::BuildRainAssets(int32 RainCount, int32 SplashCount)
+FString URainBuilderLibrary::BuildRainAssets(int32 RainCount, int32 SplashCount, int32 StageCount)
 {
 	FString Report;
 	UMaterialParameterCollection* MPC = BuildCollection();
@@ -641,16 +707,22 @@ FString URainBuilderLibrary::BuildRainAssets(int32 RainCount, int32 SplashCount)
 	UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), TEXT("NS_RainMagic"));
 	AddRainUserParameters(System);
 
-	// One rain: a single emitter, one density and one drop-size distribution everywhere. Near and far,
-	// big and small on screen, come from perspective alone.
+	// One rain: a single emitter. The field has one density and one drop-size distribution everywhere (near
+	// and far, big and small on screen, come from perspective alone); on top of it the stage rain, the rain
+	// towers' big drops around the performance area.
+	FRainDropConfig Config;
+	Config.StageCount = FMath::Clamp(StageCount, 0, RainCount);
 	if (RainCount > 0)
 	{
-		UNiagaraEmitter* Emitter = BuildRainEmitter(RainCount, FRainDropConfig(), DropMaterial, Report);
+		UNiagaraEmitter* Emitter = BuildRainEmitter(RainCount, Config, DropMaterial, Report);
 		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
 	}
 	if (SplashCount > 0)
 	{
-		UNiagaraEmitter* Splash = BuildSplashEmitter(SplashCount, DropMaterial, Report);
+		// Impacts are proportional to drops x fall speed (~8.3 m/s for the stage's drops, ~6.5 m/s in the field).
+		const float StageRate = Config.StageCount * 8.3f;
+		const float StageShare = RainCount > 0 ? StageRate / (StageRate + (RainCount - Config.StageCount) * 6.5f) : 0.0f;
+		UNiagaraEmitter* Splash = BuildSplashEmitter(SplashCount, StageShare, DropMaterial, Report);
 		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Splash, Splash->GetExposedVersion().VersionGuid, true);
 	}
 

@@ -20,12 +20,19 @@
 //    instead of crawling sub-pixel arcs, and a defocused drop is the same drop smeared over its blur disc:
 //    never brighter than in focus.
 //  * Dyn.z: the soft (out-of-focus) fraction of the disc radius, from the particle-space depth of field.
+//  * DynOneX (dynamic parameter 1, x): the drop is an oblate spheroid; seen from the camera an ellipse
+//    whose semi-axis along the sprite is DynOneX half-widths (1: round, e.g. a streak's cross-section).
+//    Shaded as that ellipsoid.
+//  * Spot lamps light (and glint in) only the drops inside their cone.
+//  * Dyn.w: the drop's random brightness factor for the lamp light (its shape and tilt decide how much of a
+//    lamp's image reaches the lens), the same one Niagara applies to the per-particle light.
 //  * SkyGlow: optional extra sky radiance above the horizon, for an environment without a lit sky.
 //
-// Inputs: UV(float2) DynX..DynW(Niagara dynamic parameter: s, path, soft, rand) PCol(float4: tint, visibility)
-//         CamVec(float3) Env(TextureCube) CamW(float3) Look(float4: env gain, glint gain, streak gain, exposure)
-//         SkyGlow(float4: rgb radiance of the sky above the horizon)
-//         L0P..L5P (float4 world pos xyz, soft radius w)  L0C..L5C (float4 rgb = colour * intensity)
+// Inputs: UV(float2) DynX..DynW(Niagara dynamic parameter: s, path, soft, rand) DynOneX(dynamic parameter 1: bead
+//         ratio) PCol(float4: tint, visibility) CamVec(float3) Env(TextureCube) CamW(float3)
+//         Look(float4: env gain, glint gain, streak gain, exposure) SkyGlow(float4: rgb radiance of the sky)
+//         L0P..L5P (float4 world pos xyz, soft radius w)  L0C..L5C (float4 rgb = colour * intensity, w = cos inner)
+//         L0D..L5D (float4 spot axis xyz, cos outer w; point lamps: w = -2, L.C.w = -1)
 // =====================================================================================
 struct FPrDrop
 {
@@ -42,7 +49,7 @@ struct FPrDrop
 	}
 
 	// SigN: angular spread of the normals one pixel sees (pixel footprint and lens blur, radians).
-	float3 Shade(float3 N, float3 V, float3 Pw, TextureCube EnvT, SamplerState EnvS, float4 LP[6], float4 LC[6], float4 Look, float3 Glow, float Rnd, float SigN)
+	float3 Shade(float3 N, float3 V, float3 Pw, TextureCube EnvT, SamplerState EnvS, float4 LP[6], float4 LC[6], float4 LD[6], float4 Look, float3 Glow, float Rnd, float SigN)
 	{
 		// The reflected ray turns twice as fast as the normal, the ray refracted through the sphere ~1.5x.
 		float SigR = 2.0 * SigN;
@@ -69,19 +76,21 @@ struct FPrDrop
 
 		float3 C = (F * (EnvT.SampleLevel(EnvS, R, MipR).rgb + Sky(R, Glow)) + Ft * 0.985 * (EnvT.SampleLevel(EnvS, T2, MipT).rgb + Sky(T2, Glow))) * Look.x;
 
+		float3 G = float3(0.0, 0.0, 0.0);
 		[unroll]
 		for (int i = 0; i < 6; i++)
 		{
 			float3 Lv = LP[i].xyz - Pw;
 			float D2 = dot(Lv, Lv);
 			float3 L = Lv * rsqrt(max(D2, 1.0));
-			// Irradiance relative to 10 m: LC is "brightness of the glint at 10 m".
-			float3 E = LC[i].rgb * (1.0e6 / max(D2, LP[i].w * LP[i].w + 100.0));
+			// Irradiance relative to 10 m: LC is "brightness of the glint at 10 m"; spot cone from LD / LC.w.
+			float Cone = saturate((dot(-L, LD[i].xyz) - LD[i].w) / max(LC[i].w - LD[i].w, 1e-4));
+			float3 E = LC[i].rgb * (1.0e6 / max(D2, LP[i].w * LP[i].w + 100.0)) * Cone * Cone;
 			float GR = pow(saturate(dot(R, L)), NR) * (NR / 900.0) * F * 40.0;
 			float GT = pow(saturate(dot(T2, L)), NT) * (NT / 140.0) * Ft * 6.0;
-			C += E * (GR + GT) * Look.y;
+			G += E * (GR + GT);
 		}
-		return C * (0.85 + 0.3 * Rnd);
+		return C + G * Look.y * (0.45 + 1.1 * Rnd);
 	}
 };
 
@@ -89,6 +98,7 @@ FPrDrop PrDrop;
 float4 Dyn = float4(DynX, DynY, DynZ, DynW);
 float4 PrLP[6] = { L0P, L1P, L2P, L3P, L4P, L5P };
 float4 PrLC[6] = { L0C, L1C, L2C, L3C, L4C, L5C };
+float4 PrLD[6] = { L0D, L1D, L2D, L3D, L4D, L5D };
 
 // Debug view: Look.w (DropExposure) > 99 paints every sprite opaque magenta (geometry/visibility check).
 if (Look.w > 99.0)
@@ -97,14 +107,16 @@ if (Look.w > 99.0)
 }
 
 float PrVis = PCol.a;
-float PrS = max(Dyn.x, 1.0);
+float PrR = DynOneX > 0.0 ? DynOneX : 1.0;   // the bead's semi-axis along the sprite, in half-widths
+float PrS = max(Dyn.x, PrR);                 // half the sprite's length, in half-widths
 float2 PrQ = UV * 2.0 - 1.0;
 float PrX = PrQ.x;
-float PrY = PrQ.y * PrS;          // along the sprite axis, in drop-radius units
-float PrHs = PrS - 1.0;           // half length of the swept segment
+float PrY = PrQ.y * PrS;          // along the sprite axis, in half-widths
+float PrHs = PrS - PrR;           // half length of the swept segment
 
 // Derivatives must be taken before any divergent branch / early return (undefined on Metal otherwise).
-float PrRound = length(float2(PrX, PrY));
+// Distance from the swept bead's centre in bead radii: 1 on its rim.
+float PrRound = length(float2(PrX, max(abs(PrY) - PrHs, 0.0) / PrR));
 float PrRoundFw = max(fwidth(PrRound) * 1.2, 1e-3);
 // Film-rain boost for long falling streaks (Look.z): thin streaks are physically too faint to read, so they
 // are lit up; a streak several pixels wide (a drop close to the lens) already reads and keeps its true
@@ -118,8 +130,7 @@ PrBoost = lerp(PrBoost, 1.0, smoothstep(2.0, 10.0, PrPixAcross));
 // its average over the unit disc is 1. Streaks keep it spread along their length (the core sweeps a line).
 float PrSoftQ = saturate(Dyn.z);
 float PrCoreS2 = 0.1225 * (1.0 - PrSoftQ * PrSoftQ) + 0.25 * PrSoftQ * PrSoftQ + 4.0 / (PrPixAcross * PrPixAcross);
-float PrCoreR = length(float2(PrX, max(abs(PrY) - PrHs, 0.0)));
-float PrCore = exp(-PrCoreR * PrCoreR / (2.0 * PrCoreS2)) / (2.0 * PrCoreS2 * (1.0 - exp(-0.5 / PrCoreS2)));
+float PrCore = exp(-PrRound * PrRound / (2.0 * PrCoreS2)) / (2.0 * PrCoreS2 * (1.0 - exp(-0.5 / PrCoreS2)));
 PrCore = lerp(PrCore, 1.0, saturate(PrHs * 2.0));
 
 float PrHx = 1.0 - PrX * PrX;
@@ -133,16 +144,15 @@ if (PrHx <= 0.0 || PrVis <= 0.0)
 if (Dyn.y > 0.5)
 {
 	float PrSoftC = saturate(Dyn.z);
-	float PrHwC = sqrt(PrHx);
+	float PrHwC = PrR * sqrt(PrHx);
 	float PrSpanC = min(PrHs, PrY + PrHwC) - max(-PrHs, PrY - PrHwC);
 	float PrCoverC = PrHs > 1e-3 ? saturate(PrSpanC / (2.0 * PrHs)) : saturate((1.0 - PrRound) / PrRoundFw);
 	// Defocused drops: a soft disc (the drop's light spread evenly over its blur disc).
-	float PrEdgeD = length(float2(PrX, max(abs(PrY) - PrHs, 0.0)));
-	float PrBokeh = saturate((1.0 - PrEdgeD) / max(PrSoftC * 0.6, PrRoundFw));
-	PrCoverC = lerp(PrCoverC, PrBokeh * (PrHs > 1e-3 ? 1.0 / (1.0 + PrHs) : 1.0), saturate(PrSoftC * 3.0));
+	float PrBokeh = saturate((1.0 - PrRound) / max(PrSoftC * 0.6, PrRoundFw));
+	PrCoverC = lerp(PrCoverC, PrBokeh * (PrHs > 1e-3 ? PrR / (PrR + PrHs) : 1.0), saturate(PrSoftC * 3.0));
 	return float4(PCol.rgb * PrCore * PrBoost * Look.w, saturate(PrCoverC * PrVis));
 }
-float PrHw = sqrt(PrHx);
+float PrHw = PrR * sqrt(PrHx);
 float PrC0 = max(-PrHs, PrY - PrHw);
 float PrC1 = min(PrHs, PrY + PrHw);
 float PrSpan = PrC1 - PrC0;
@@ -152,7 +162,7 @@ if (PrSpan <= 0.0)
 }
 float PrCover = PrHs > 1e-3 ? saturate(PrSpan / (2.0 * PrHs)) : 1.0;
 
-// Shading frame: view-facing sphere built from the sprite axes.
+// Shading frame: view-facing ellipsoid built from the sprite axes (semi-axes 1 across, PrR along, 1 deep).
 float3 PrV = normalize(CamVec);
 float3 PrUp = Parameters.TangentToWorld[1];
 PrUp = normalize(PrUp - PrV * dot(PrUp, PrV) + 1e-6);
@@ -176,10 +186,10 @@ for (int k = 0; k < 4; k++)
 	if (k < PrK)
 	{
 		float PrC = PrK == 1 ? 0.0 : lerp(PrC0, PrC1, (k + PrJit) / PrK);
-		float2 PrL = float2(PrX, PrY - PrC);
+		float2 PrL = float2(PrX, (PrY - PrC) / PrR);
 		float PrZ = sqrt(saturate(1.0 - dot(PrL, PrL)));
-		float3 PrN = normalize(PrL.x * PrRt + PrL.y * PrUp + PrZ * PrV);
-		PrAcc += PrDrop.Shade(PrN, PrV, PrPw, Env, EnvSampler, PrLP, PrLC, Look, SkyGlow.rgb, Dyn.w, PrSigN);
+		float3 PrN = normalize(PrL.x * PrRt + (PrL.y / PrR) * PrUp + PrZ * PrV);
+		PrAcc += PrDrop.Shade(PrN, PrV, PrPw, Env, EnvSampler, PrLP, PrLC, PrLD, Look, SkyGlow.rgb, Dyn.w, PrSigN);
 	}
 }
 PrAcc /= PrK;

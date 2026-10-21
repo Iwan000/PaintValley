@@ -1,7 +1,7 @@
 // Project Rain - drives the NS_RainMagic Niagara system: the trick (rain -> stop -> hover -> chaos ->
 // lift -> resume), either from the scripted performance timeline or from the player's controls, plus
-// the global strobe, the performer's hand, stage-light glints, the camera the rain field follows and
-// the environment capture used for the drops' refraction.
+// the performer's hand, stage-light glints, the camera the rain field follows (and its lens) and the
+// environment capture used for the drops' refraction.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -10,7 +10,6 @@
 
 class ANiagaraActor;
 class ASceneCaptureCube;
-class APostProcessVolume;
 class UMaterialParameterCollection;
 
 UENUM(BlueprintType)
@@ -33,7 +32,7 @@ enum class ERainControl : uint8
 };
 
 /** The trick at one instant. Filled from the performance timeline or from the player's controls, then
- *  sent to the rain, the ground and the strobe in one place. */
+ *  sent to the rain and the ground in one place. */
 USTRUCT(BlueprintType)
 struct FRainTrickState
 {
@@ -50,8 +49,6 @@ struct FRainTrickState
 	UPROPERTY(BlueprintReadOnly, Category = "Rain") float LiftTime = -1.0f;
 	/** 1: the rain falls (ground ripples, splashes); 0: every drop hangs. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rain") float Raining = 1.0f;
-	/** Image gain of the strobe (1: off). */
-	UPROPERTY(BlueprintReadOnly, Category = "Rain") float Strobe = 1.0f;
 	UPROPERTY(BlueprintReadOnly, Category = "Rain") FVector Hand = FVector::ZeroVector;
 	UPROPERTY(BlueprintReadOnly, Category = "Rain") float HandStrength = 0.0f;
 };
@@ -94,9 +91,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|References")
 	TObjectPtr<AActor> ViewCamera;
 
-	/** Unbound post-process volume used for the strobe (colour gain). */
+	/** Framings to look at the rain from in PIE / game: V switches the view to the next one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|References")
-	TObjectPtr<APostProcessVolume> StrobeVolume;
+	TArray<TObjectPtr<AActor>> ShowcaseCameras;
 
 	// ------------------------------------------------------------------ performance
 	/** Seconds into the performance. Animate this from Sequencer for deterministic renders. */
@@ -151,12 +148,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Player") float ChaosRamp = 1.5f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Player") bool bShowHelp = true;
 
-	// ------------------------------------------------------------------ strobe (film: 2 frames bright / 2 dark at 23.976 fps)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Strobe") bool bStrobe = true;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Strobe") float StrobeHz = 23.976f / 4.0f;
-	/** Bright/dark ratio ~1.28 in the film. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Strobe") float StrobeRatio = 1.28f;
-
 	// ------------------------------------------------------------------ look
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float EnvGain = 1.5f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float GlintGain = 8.0f;
@@ -172,6 +163,9 @@ public:
 	/** Brightness of unresolved (sub-pixel) drops: forward scattering of the stage lights. Set against the night
 	 *  backdrop: the drops show up mostly by what they refract, the lamps add a bright core. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float ScatterGain = 2.0f;
+	/** Width of that forward scattering, exp((cos - 1) / ScatterLobe): 0.15 lights a drop fully only with its lamp
+	 *  close behind it (half at ~30 deg), so the rain glows where it is backlit and falls dark elsewhere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") float ScatterLobe = 0.15f;
 	/** Extra sky radiance above the horizon in the drops' ball lenses. 0: the night backdrop's own sky (captured into
 	 *  the drops' environment) is all they see; only a stage without a lit sky needs this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|Look") FLinearColor SkyGlow = FLinearColor(0.0f, 0.0f, 0.0f);
@@ -260,7 +254,6 @@ private:
 	void ApplyState(float DeltaSeconds, const FRainView& View);
 	void PushLightsAndCamera(const FRainView& View);
 	FVector ScriptedHand(float T) const;
-	float StrobeGain(float SinceStop) const;
 
 	FRainTrickState State;
 	FVector LastHand = FVector::ZeroVector;

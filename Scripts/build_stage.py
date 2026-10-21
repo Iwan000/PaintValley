@@ -1,11 +1,11 @@
 """Project Rain - builds /Game/RainMagic/Maps/L_RainStage: a minimal night stage for the rain.
 
-Only what the drops need: a wet ground, the magician (UE mannequin), four high stage lamps with visible
-lamp heads (two behind the magician backlight the rain; the drops' forward-scattering glints and the
-bright points their ball lenses refract),
-a key light, thin height fog, a night backdrop (an HDR panorama of a wet city square, for the drops to
-refract), and the rain/controller/camera actors. The v6 Greenwich stage (colonnades, crowd, bus) lives in
-Scripts/legacy/build_stage_greenwich.py.
+Only what the drops need: a wet ground, the magician (UE mannequin), four high stage lamps (film lights
+far out behind the magician backlight the rain: the drops' forward-scattering glints and the bright points
+their ball lenses refract; a near side lamp lights the ground), a key light, a thin haze, a night backdrop
+(an HDR panorama of a wet city square: the drops are water only through what they refract), the cameras
+(V cycles them in PIE) and the rain/controller actors. The v6 Greenwich stage (colonnades, crowd, bus)
+lives in Scripts/legacy/build_stage_greenwich.py.
 
 Run inside the editor:  python3 Scripts/ue_cmd.py -f Scripts/build_stage.py
 Assumes Scripts/import_backdrop.py, URainBuilderLibrary.build_rain_assets() and build_stage_materials()
@@ -141,11 +141,45 @@ LAMPS = [
 TARGET = (0.0, 0.0, 140.0)
 
 # Night backdrop (M_NightSky): panorama brightness on the stage and its turn about the vertical (the lit
-# town hall behind Atlas for the hero camera, which looks down +X). The dome only has to enclose the
-# ground; it is drawn at infinity.
-SKY_EXPOSURE = 40.0
+# town hall behind Atlas for the hero camera, which looks down +X). The dome is drawn at infinity; it is
+# big (500 m) so the strip of it a camera sees below the ground's far edge is thin (~0.2 deg), and the
+# ground plane reaches out to it.
+SKY_EXPOSURE = 18.0
 SKY_YAW = 0.0
-SKY_RADIUS = 10000.0
+SKY_RADIUS = 50000.0
+
+# Framings for the rain, as (label, location, look-at, focal length mm, f-number, focus distance cm). Atlas
+# stands at the origin facing -X; his hand is at about (-60, -10, 155).
+CAMERAS = [
+    # Medium shot from just below his eyeline, as in the film: Atlas waist-up, drops all around him.
+    ("CineCam_Hero", (-230, -45, 140), (0, 10, 160), 40.0, 2.2, 205.0),
+    # Close-up past his head down the square: beads at the lens, the city melted into lights.
+    ("CineCam_Close", (-180, -30, 168), (100, -30, 164), 50.0, 2.0, 182.0),
+    # From his side at hand height: the stopped rain in front of the lit shop fronts.
+    ("CineCam_Side", (-70, -230, 150), (-60, 0, 152), 50.0, 2.8, 218.0),
+    # Low, looking up past him into the street lamps and the glowing sky.
+    ("CineCam_Low", (-250, -150, 110), (0, 0, 185), 35.0, 2.8, 290.0),
+    # The whole figure from 6.5 m (the earlier hero view).
+    ("CineCam_Wide", (-650, 45, 160), (0, 0, 150), 35.0, 2.8, 650.0),
+]
+
+
+def cine_cam(label, loc, target, focal, fstop, focus):
+    a = eas.spawn_actor_from_class(unreal.CineCameraActor, unreal.Vector(*loc), look_rot(loc, target))
+    a.set_actor_label(label)
+    c = a.get_cine_camera_component()
+    fb = c.get_editor_property("filmback")
+    fb.set_editor_property("sensor_width", 24.89)
+    fb.set_editor_property("sensor_height", 10.41)
+    c.set_editor_property("filmback", fb)
+    c.set_editor_property("current_focal_length", focal)
+    c.set_editor_property("current_aperture", fstop)
+    fs = c.get_editor_property("focus_settings")
+    fs.set_editor_property("focus_method", unreal.CameraFocusMethod.MANUAL)
+    fs.set_editor_property("manual_focus_distance", focus)
+    c.set_editor_property("focus_settings", fs)
+    a.set_folder_path("Cameras")
+    return a
 
 
 def build():
@@ -156,9 +190,9 @@ def build():
     pole_mat = mi("MI_Pole", (0.02, 0.02, 0.022), 0.4, metal=0.8)
     ground_mat = unreal.load_asset(ROOT + "/Materials/M_WetGround")
 
-    # ---- ground: one wet paved plane with puddles and rain ripples (WetGround.hlsl), out to where the
-    # backdrop's own square takes over
-    mesh(PLANE, (0, 0, 0), (120, 120, 1), mat=ground_mat, label="Ground_Wet")
+    # ---- ground: one wet paved plane with puddles and rain ripples (WetGround.hlsl), out to the dome,
+    # where the backdrop's buildings stand on it
+    mesh(PLANE, (0, 0, 0), (1200, 1200, 1), mat=ground_mat, label="Ground_Wet")
 
     # ---- night backdrop: an HDR panorama of a wet city square at night (NightSky.hlsl). It is the
     # background and, captured into the drops' environment cube, what every drop refracts: on black, a
@@ -179,20 +213,22 @@ def build():
     for i, (az, dist, h, cd, rgb) in enumerate(LAMPS):
         a = math.radians(az)
         src = (dist * math.cos(a), dist * math.sin(a), h)
-        mesh(SPHERE, src, (0.3, 0.3, 0.3) if dist < 2000 else (0.8, 0.8, 0.8), mat=lamp, label=f"LampHead_{i}",
-             folder="Stage/Lamps", shadows=False)
-        mesh(CYL, (src[0], src[1], (h - 15) * 0.5), (0.06, 0.06, (h - 15) / 100.0), mat=pole_mat,
-             label=f"LampPole_{i}", folder="Stage/Lamps", shadows=False)
-        # The far lamps would glare in the wet ground behind Atlas: they light only him (and the drops).
+        # The far lamps are film lights on cranes, out of the picture (the backdrop has its own street lamps):
+        # only the near side lamp gets a visible head and pole.
         far = dist >= 2000
+        if not far:
+            mesh(SPHERE, src, (0.3, 0.3, 0.3), mat=lamp, label=f"LampHead_{i}", folder="Stage/Lamps", shadows=False)
+            mesh(CYL, (src[0], src[1], (h - 15) * 0.5), (0.06, 0.06, (h - 15) / 100.0), mat=pole_mat,
+                 label=f"LampPole_{i}", folder="Stage/Lamps", shadows=False)
+        # The far lamps would glare in the wet ground behind Atlas: they light only him (and the drops).
         glints.append(spot(src, look_rot(src, TARGET), cd, rgb, outer=15 if far else 40, inner=6 if far else 15,
                            radius=6000, vol=1.2, source=18, label=f"Lamp_{i}", folder="Lights", ground=not far))
 
-    # ---- sky lamp: a floodlight high up behind the column (opposite the hero camera), pointing up into
-    # the empty sky so it lights nothing in the scene. It only feeds the drops' glint/scatter lighting:
-    # the wide and low shots looking up at the rising rain see the drops backlit against the night.
-    sky_lamp = spot((1500, -600, 2600), (90, 0, 0), 150000.0, (225, 232, 255), outer=5, inner=2, radius=100,
-                    vol=0.0, source=40, label="Lamp_Sky", folder="Lights")
+    # ---- sky lamp: a lamp high up behind the column (opposite the hero camera) whose light reaches only
+    # 1 m, so it lights nothing in the scene. It only feeds the drops' glint/scatter lighting (as a point
+    # lamp, no cone): the wide and low shots looking up at the rising rain see the drops backlit.
+    sky_lamp = point((1500, -600, 2600), 150000.0, (225, 232, 255), radius=100, vol=0.0, source=40,
+                     label="Lamp_Sky", folder="Lights")
     glints.append(sky_lamp)
 
     # ---- the magician: UE mannequin in a dark wet coat, idling, facing the hero camera (-X).
@@ -217,9 +253,12 @@ def build():
     # a frame on an M2 Pro. Tick "Volumetric Fog" on the fog actor to get the beams back.
     fog = eas.spawn_actor_from_class(unreal.ExponentialHeightFog, unreal.Vector(0, 0, 0), unreal.Rotator(0, 0, 0))
     fc = fog.component
-    fc.set_editor_property("fog_density", 0.03)
+    # Rain haze lit by the city: distant pavement and buildings fade into the same warm glow.
+    # The panorama has its own air: the fog stops short of the dome (450 m).
+    fc.set_editor_property("fog_density", 0.002)
+    fc.set_editor_property("fog_cutoff_distance", 45000.0)
     fc.set_editor_property("fog_height_falloff", 0.15)
-    fc.set_editor_property("fog_inscattering_luminance", unreal.LinearColor(0.003, 0.004, 0.006, 1))
+    fc.set_editor_property("fog_inscattering_luminance", unreal.LinearColor(1.2, 1.05, 0.85, 1))
     fc.set_editor_property("enable_volumetric_fog", False)
     fc.set_editor_property("volumetric_fog_scattering_distribution", 0.55)
     fc.set_editor_property("volumetric_fog_albedo", unreal.Color(200, 205, 210, 255))
@@ -247,10 +286,10 @@ def build():
     mc.set_mobility(unreal.ComponentMobility.MOVABLE)
     moon.set_folder_path("Atmosphere")
 
-    # ---- post: manual exposure (stable under the strobe), bloom, grain. No Lumen: at night the
+    # ---- post: manual exposure, bloom, grain. No Lumen: at night the
     # stage is lit by a few direct lights, and Lumen GI/reflections cost a lot on a Mac GPU.
     ppv = eas.spawn_actor_from_class(unreal.PostProcessVolume, unreal.Vector(0, 0, 0), unreal.Rotator(0, 0, 0))
-    ppv.set_actor_label("PPV_Strobe")
+    ppv.set_actor_label("PPV_Night")
     ppv.set_editor_property("unbound", True)
     s = ppv.get_editor_property("settings")
     s.set_editor_property("override_auto_exposure_method", True)
@@ -299,31 +338,20 @@ def build():
     ctrl.set_editor_property("collection", unreal.load_asset(ROOT + "/Materials/MPC_Rain"))
     ctrl.set_editor_property("glint_lights", glints[:6])
     ctrl.set_editor_property("performer", perf)
-    ctrl.set_editor_property("strobe_volume", ppv)
     ctrl.set_folder_path("Rain")
 
-    # ---- hero camera: 35 mm, Super35 2.39:1, f/2.8 focused on Atlas
-    cam_loc = (-650, 45, 160)
-    cam = eas.spawn_actor_from_class(unreal.CineCameraActor, unreal.Vector(*cam_loc), look_rot(cam_loc, (0, 0, 150)))
-    cam.set_actor_label("CineCam_Hero")
-    ccc = cam.get_cine_camera_component()
-    fb = ccc.get_editor_property("filmback")
-    fb.set_editor_property("sensor_width", 24.89)
-    fb.set_editor_property("sensor_height", 10.41)
-    ccc.set_editor_property("filmback", fb)
-    ccc.set_editor_property("current_focal_length", 35.0)
-    ccc.set_editor_property("current_aperture", 2.8)
-    focus = ccc.get_editor_property("focus_settings")
-    focus.set_editor_property("focus_method", unreal.CameraFocusMethod.MANUAL)
-    focus.set_editor_property("manual_focus_distance", 650.0)
-    ccc.set_editor_property("focus_settings", focus)
-    cam.set_folder_path("Cameras")
-    ctrl.set_editor_property("view_camera", cam)
+    # ---- cameras (Super35 2.39:1, focused on the drops around Atlas). The rain shows as water where drops are
+    # both in focus and big on screen: close to the lens and the focus plane, so the framings are close, on
+    # fast lenses, with the city behind blurred to lights. CineCam_Hero is the PIE / game view; V cycles them.
+    cams = [cine_cam(*c) for c in CAMERAS]
+    ctrl.set_editor_property("view_camera", cams[0])
+    ctrl.set_editor_property("showcase_cameras", cams)
+    cam_loc, cam_target = CAMERAS[0][1], CAMERAS[0][2]
     ps = eas.spawn_actor_from_class(unreal.PlayerStart, unreal.Vector(-900, 0, 100), unreal.Rotator(0, 0, 0))
     ps.set_folder_path("Cameras")
 
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
-        unreal.Vector(*cam_loc), look_rot(cam_loc, (0, 0, 150)))
+        unreal.Vector(*cam_loc), look_rot(cam_loc, cam_target))
     # The sky light lights the stage with what it captures: now the backdrop's overcast city sky.
     sc.recapture_sky()
     les.save_current_level()

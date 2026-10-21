@@ -9,10 +9,10 @@
 //   matching the film), so streak length shrinks continuously instead of popping. The player's
 //   push and brush act on top of both: wind for the falling rain, flight for the hanging drops.
 //
-// Recycling: drops never die. They live in the rain field's periodic window; falling drops that
-// reach the ground re-enter at the cloud base, and drops lifted up to the park height are "parked"
-// (hidden) and re-enter from the clouds when the rain resumes. Hidden drops get a zero-size sprite
-// so the GPU never rasterizes them.
+// Recycling: drops never die. Field drops live in the rain field's periodic window, stage drops around
+// the stage (RainField.hlsl); falling drops that reach the ground re-enter at the cloud base, and drops
+// lifted up to the park height are "parked" (hidden) and re-enter from the clouds when the rain resumes.
+// Hidden drops get a zero-size sprite so the GPU never rasterizes them.
 // $(...) placeholders are replaced by the C++ builder.
 // =====================================================================================
 // A hitch (seconds-long frame) must not teleport falling drops metres underground; it slows the sim instead.
@@ -28,6 +28,7 @@ float PrFrz = Particles.RainFrozen;
 float PrState = Particles.RainState;
 float PrTimer = Particles.RainTimer;
 float3 PrDir = Particles.RainDir;
+bool PrStage = Particles.RainStage > 0.5;
 
 float PrGround = Engine.Owner.Position.z;
 float PrTop = PrGround + $(HEIGHT);
@@ -158,8 +159,8 @@ if (PrState < 0.5)
 	{
 		if (PrRaining)
 		{
-			// Hit the ground: fall again from the cloud base, somewhere else in the field.
-			PrP = float3(PrWinMin + PR_CELL * float2(PrN0, PrN1), PrP.z + (PrTop - PrGround));
+			// Hit the ground: fall again from the cloud base, somewhere else in the field (or on the stage).
+			PrP = float3(PrStage ? PR_STAGE_XY(PrN0, PrN1) : PrWinMin + PR_CELL * float2(PrN0, PrN1), PrP.z + (PrTop - PrGround));
 		}
 		else if (PrFrz > 0.5)
 		{
@@ -183,12 +184,16 @@ else if (PrRaining)
 	{
 		PrState = 0.0;
 		PrFrz = 0.0;
-		PrP = float3(PrWinMin + PR_CELL * float2(PrN0, PrN1), PrTop - PrRnd.y * 60.0);
+		PrP = float3(PrStage ? PR_STAGE_XY(PrN0, PrN1) : PrWinMin + PR_CELL * float2(PrN0, PrN1), PrTop - PrRnd.y * 60.0);
 		PrV = PrVNat;
 	}
 }
-// The window follows the camera: fold every drop back into it (only drops at its edges move).
-PrP.xy = PR_FOLD(PrP.xy);
+// The window follows the camera: fold every field drop back into it (only drops at its edges move). Stage
+// drops stay where they are: the stage is a real place.
+if (!PrStage)
+{
+	PrP.xy = PR_FOLD(PrP.xy);
+}
 
 // ---------------------------------------------------------------- render attributes
 float PrSpeed = length(PrV);
@@ -198,7 +203,6 @@ if (PrSpeed > 2.0)
 }
 // Hanging beads read bigger in the film (big rain-machine drops, bloom): art-directable boost.
 float PrW = PrDcm * User.RainSizeScale * lerp(1.0, User.RainFrozenSizeScale, PrFrz);
-float PrL = PrSpeed * User.RainShutter + PrW;
 
 float PrVis = (PrState < 0.5 ? 1.0 : 0.0) * (frac(PrRnd.w * 7.31 + PrRnd.x) < User.RainActiveFraction ? 1.0 : 0.0);
 PrVis *= saturate((PrTop - PrP.z) / 120.0 + PrFrz);
@@ -216,6 +220,7 @@ if (PrCamD > 100.0 && dot(PrToCam, User.RainCameraFwd) > -PrViewCos * PrCamD)
 {
 	PrVis = 0.0;
 }
+PrToCam /= PrCamD;
 
 Particles.Position = PrP;
 Particles.Velocity = PrV;
@@ -223,23 +228,43 @@ Particles.RainFrozen = PrFrz;
 Particles.RainState = PrState;
 Particles.RainTimer = PrTimer;
 Particles.RainDir = PrDir;
-// Nearly round drops: keep the sprite square-on to the camera (an aligned sprite seen along its
-// axis, e.g. looking up into the frozen rain, would collapse to a line).
-PrToCam /= PrCamD;
-float3 PrPerp = PrDir - PrToCam * dot(PrDir, PrToCam);
-if (dot(PrPerp, PrPerp) < 1e-6)
+
+// ---------------------------------------------------------------- shape and streak
+// The drop's shape: an oblate spheroid flattened along its fall (Beard & Chuang 1987: axis ratio 0.93 at
+// 2 mm, 0.78 at 4 mm, 0.64 at 6 mm), each tilted a little its own way. A held drop is liquid held in the
+// air: it rocks and breathes slowly (big drops more), so no two beads catch the light the same way.
+float PrWob = PrFrz * saturate(PrDmm / 4.0);
+float PrPh = PrTime * (1.2 + 1.3 * PrRnd.z) + 6.2832 * PrRnd.w;
+float PrRatio = 1.0048 + PrDmm * (5.7e-4 + PrDmm * (-2.628e-2 + PrDmm * (3.682e-3 - 1.677e-4 * PrDmm)));
+PrRatio *= 1.0 + 0.12 * PrWob * sin(PrPh);
+float3 PrAxis = normalize(float3(0.35 * (PrRnd.x - 0.5) + 0.25 * PrWob * sin(0.8 * PrPh + 1.3),
+	0.35 * (PrRnd.y - 0.5) + 0.25 * PrWob * cos(0.7 * PrPh), 1.0));
+// Seen from the camera, a spheroid is an ellipse: its axis on screen, its ratio from how far the axis
+// leans out of the view (round when seen along the axis).
+float PrCosA = dot(PrAxis, PrToCam);
+float PrBeadR = sqrt(PrRatio * PrRatio * (1.0 - PrCosA * PrCosA) + PrCosA * PrCosA);
+float3 PrAxS = PR_ACROSS(PrAxis, PrToCam);
+// The streak: the motion across the line of sight during the exposure (RainField.hlsl). A bead while it
+// is under half the drop's width, a streak beyond: the sprite turns from the drop's axis to its motion.
+float3 PrVS = PR_ACROSS(PrV, PrToCam);
+float PrStreak = length(PrVS) * User.RainShutter;
+float3 PrMv = PrVS / max(length(PrVS), 1e-6);
+float PrRound = 1.0 - saturate(2.0 * PrStreak / max(PrW, 1e-4));
+PrAxS *= dot(PrAxS, PrMv) < 0.0 ? -1.0 : 1.0;
+float3 PrAlign = lerp(PrMv, PrAxS, PrRound);
+if (dot(PrAlign, PrAlign) < 1e-8)
 {
-	PrPerp = cross(PrToCam, float3(1.0, 0.0, 0.0));
+	PrAlign = cross(PrToCam, abs(PrToCam.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0));
 }
-float PrRound = 1.0 - saturate((PrL / max(PrW, 1e-4) - 1.0) * 2.0);
-Particles.SpriteAlignment = normalize(lerp(PrDir, normalize(PrPerp), PrRound));
+Particles.SpriteAlignment = normalize(PrAlign);
+// The bead's semi-axis along the sprite, in half-widths (1 for a streak: its cross-section is the width).
+float PrR = lerp(1.0, PrBeadR, PrRound);
+float PrL = PrStreak + PrW * PrR;
+
 // ---------------------------------------------------------------- screen-size LOD
 // Drops narrower than a few pixels can't show their ball-lens image: light them once per particle
-// here (forward-scattering phase towards each stage light + ambient) and let the material take a
-// cheap path. Only resolved drops near the camera get the full per-pixel ball-lens shading.
-// The phase is broad: light refracted straight through a water sphere leaves it deviated by 0-83 deg,
-// nearly evenly up to ~30 deg, so exp((cos - 1) / 0.3) (68% at 30 deg, 43% at 45 deg), plus a faint
-// isotropic share for the reflected light (User.RainSide).
+// here (stage lamps, RainField.hlsl) and let the material take a cheap path. Only resolved drops
+// near the camera get the full per-pixel ball-lens shading.
 float PrPixW = PrW * User.RainPixelScale / PrCamD;
 float PrSimple = PrPixW < User.RainLodPixels ? 1.0 : 0.0;
 
@@ -259,28 +284,25 @@ float PrGrow = PrBlurW - PrW;
 float3 PrLum = User.RainAmbient;
 if (PrVis > 0.002)
 {
-#define PR_LIGHT(LP, LC) { float3 PrLd = PrP - LP.xyz; float PrD2 = dot(PrLd, PrLd); float PrCos = dot(PrLd * rsqrt(max(PrD2, 1.0)), PrToCam); PrLum += LC.rgb * (1.0e6 / max(PrD2, LP.w * LP.w + 100.0)) * (User.RainForward * exp((PrCos - 1.0) / 0.3) + User.RainSide); }
-	PR_LIGHT(User.RainL0P, User.RainL0C)
-	PR_LIGHT(User.RainL1P, User.RainL1C)
-	PR_LIGHT(User.RainL2P, User.RainL2C)
-	PR_LIGHT(User.RainL3P, User.RainL3C)
-	PR_LIGHT(User.RainL4P, User.RainL4C)
-	PR_LIGHT(User.RainL5P, User.RainL5C)
-#undef PR_LIGHT
+	PR_LAMPS(PrLum, PrP, PrToCam)
 }
 
 // Invisible drops (out of view, parked, faded out, too defocused, at the lens) collapse to degenerate
 // quads: they cost nothing in rasterization and tile binning. (Not culled with Particles.VisibilityTag:
 // in UE 5.7 the GPU cull + depth sort then loses the nearest drops, the end of the sorted list.)
 Particles.SpriteSize = PrVis > 0.002 ? float2(PrW + PrGrow, PrL + PrGrow) : float2(0.0, 0.0);
-Particles.Color = float4(PrLum * (0.85 + 0.3 * PrRnd.y), PrVis);
-// x: stretch L/W. y: shading path, 1 = cheap (per-particle light); -1..0 = full ball-lens shading,
-// with -y = how much of the per-particle scattered light to add (1 at the switch to the cheap path, 0 from
-// 4x the size threshold), so drops don't change brightness when they switch (the environment refracted
-// by a resolved drop is darker than the forward-scattering estimate). z: soft (defocused) fraction of
-// the disc radius. w: random.
+// How much of a lamp's light a drop sends to the lens depends on where its shape and tilt put the lamp's
+// image: it differs a lot from drop to drop (x0.45 .. x1.55, the same factor scales the glints).
+Particles.Color = float4(PrLum * (0.45 + 1.1 * PrRnd.y), PrVis);
+// x: sprite length / width. y: shading path, 1 = cheap (per-particle light); -1..0 = full ball-lens
+// shading, with -y = how much of the per-particle scattered light to add (1 at the switch to the cheap
+// path, 0 from 4x the size threshold), so drops don't change brightness when they switch (the environment
+// refracted by a resolved drop is darker than the forward-scattering estimate). z: soft (defocused)
+// fraction of the disc radius. w: random (brightness, as above).
 float PrGlow = saturate(1.0 - (PrPixW - User.RainLodPixels) / (3.0 * max(User.RainLodPixels, 0.1)));
-Particles.DynamicMaterialParameter = float4((PrL + PrGrow) / (PrW + PrGrow), PrSimple > 0.5 ? 1.0 : -PrGlow, PrSoft, PrRnd.x);
+Particles.DynamicMaterialParameter = float4((PrL + PrGrow) / (PrW + PrGrow), PrSimple > 0.5 ? 1.0 : -PrGlow, PrSoft, PrRnd.y);
+// x: the bead's semi-axis along the sprite, in half-widths of the sprite (the blur rounds it).
+Particles.DynamicMaterialParameter1 = float4((PrW * PrR + PrGrow) / (PrW + PrGrow), 0.0, 0.0, 0.0);
 
 #undef PR_NEXT
 #undef PR_U01
@@ -288,3 +310,7 @@ Particles.DynamicMaterialParameter = float4((PrL + PrGrow) / (PrW + PrGrow), PrS
 #undef PR_FOLD
 #undef PR_NEAREST
 #undef PR_FAR_FADE
+#undef PR_STAGE_XY
+#undef PR_LAMP
+#undef PR_LAMPS
+#undef PR_ACROSS

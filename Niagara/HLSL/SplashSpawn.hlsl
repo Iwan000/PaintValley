@@ -26,6 +26,8 @@ Particles.SpriteAlignment = float3(0.0, 0.0, 1.0);
 Particles.SpriteSize = float2(0.05, 0.05);
 Particles.Color = float4(1.0, 1.0, 1.0, 0.0);
 Particles.DynamicMaterialParameter = float4(1.0, 1.0, 0.0, PsR0);
+Particles.DynamicMaterialParameter1 = float4(1.0, 0.0, 0.0, 0.0);
+Particles.RainStage = 0.0;
 
 #undef PR_NEXT
 #undef PR_U01
@@ -33,3 +35,7 @@ Particles.DynamicMaterialParameter = float4(1.0, 1.0, 0.0, PsR0);
 #undef PR_FOLD
 #undef PR_NEAREST
 #undef PR_FAR_FADE
+#undef PR_STAGE_XY
+#undef PR_LAMP
+#undef PR_LAMPS
+#undef PR_ACROSS

@@ -33,3 +33,28 @@ float2 PrWinMin = PrCam.xy - 0.5 * PR_CELL + PrLook * ((0.5 * PR_CELL - $(BACK))
 // side edges (half a period away from the camera's axis).
 float PrSinHalfFov = User.RainViewTan * rsqrt(1.0 + User.RainViewTan * User.RainViewTan);
 float PrFarEnd = min(PR_CELL - $(BACK), 0.5 * PR_CELL / max(PrSinHalfFov, 0.1)) - 50.0;
+
+// Stage rain: the rain towers over the performance area. Besides the field, the first $(STAGE_COUNT) drops are
+// rain-machine drops (big, the way film rain is made to read on camera) that fall only around the stage centre,
+// the rain system's position: densest there and thinning out as a Gaussian (sigma $(STAGE_SIGMA) cm, cut at
+// $(STAGE_RADIUS) cm, inside half a period). They are not periodic: the stage is in one place, never wrapped.
+// U0, U1: uniform randoms -> horizontal position.
+#define PR_STAGE_XY(U0, U1) (Engine.Owner.Position.xy + $(STAGE_SIGMA) * sqrt(-2.0 * log(1.0 - (U0) * (1.0 - exp(-0.5 * $(STAGE_RADIUS) * $(STAGE_RADIUS) / ($(STAGE_SIGMA) * $(STAGE_SIGMA)))))) * float2(cos(6.2831853 * (U1)), sin(6.2831853 * (U1))))
+
+// Light a drop sends towards the eye from the stage lamps, lit once per particle (drops too small to show their
+// ball-lens image). Forward scattering dominates: light refracted straight through a water sphere leaves it
+// within a few tens of degrees of its path, exp((cos - 1) / User.RainLobe); a faint isotropic share
+// (User.RainSide) stands for the reflected light. Spot lamps light only the drops inside their cone (LD: spot
+// axis, cos outer; LC.w: cos inner; point lamps: LD.w = -2, LC.w = -1).
+#define PR_LAMP(Lum, P, ToEye, LP, LC, LD) { float3 PrLd = (P) - LP.xyz; float PrLd2 = dot(PrLd, PrLd); PrLd *= rsqrt(max(PrLd2, 1.0)); \
+	float PrCone = saturate((dot(PrLd, LD.xyz) - LD.w) / max(LC.w - LD.w, 1e-4)); \
+	Lum += LC.rgb * (1.0e6 / max(PrLd2, LP.w * LP.w + 100.0)) * PrCone * PrCone * (User.RainForward * exp((dot(PrLd, ToEye) - 1.0) / User.RainLobe) + User.RainSide); }
+#define PR_LAMPS(Lum, P, ToEye) \
+	PR_LAMP(Lum, P, ToEye, User.RainL0P, User.RainL0C, User.RainL0D) PR_LAMP(Lum, P, ToEye, User.RainL1P, User.RainL1C, User.RainL1D) \
+	PR_LAMP(Lum, P, ToEye, User.RainL2P, User.RainL2C, User.RainL2D) PR_LAMP(Lum, P, ToEye, User.RainL3P, User.RainL3C, User.RainL3D) \
+	PR_LAMP(Lum, P, ToEye, User.RainL4P, User.RainL4C, User.RainL4D) PR_LAMP(Lum, P, ToEye, User.RainL5P, User.RainL5C, User.RainL5D)
+
+// A camera-facing sprite must never be seen edge-on, so motion is measured across the line of sight: the
+// streak is the part of the motion across the view (a drop flying straight at the lens stays a bead and
+// only grows), drawn along its direction on screen.
+#define PR_ACROSS(V, ToEye) ((V) - (ToEye) * dot((V), (ToEye)))

@@ -14,11 +14,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildTestSystem();
 
-	/** Builds MPC_Rain, RT_RainEnv, M_RainDrop, the HLSL modules and NS_RainMagic: one rain emitter filling
-	 *  a 16 m x 16 m x 6 m window of an infinite periodic rain field that follows the camera
-	 *  (230k drops = 150 drops/m^3), plus splashes. Returns the compile report. */
+	/** Builds MPC_Rain, RT_RainEnv, M_RainDrop, the HLSL modules and NS_RainMagic: one rain emitter of RainCount
+	 *  drops, StageCount of them falling around the stage (rain towers: big drops, densest at the centre), the
+	 *  rest filling a 16 m x 16 m x 6 m window of an infinite periodic rain field that follows the camera
+	 *  (170k drops = 110 drops/m^3), plus splashes. Returns the compile report. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
-	static FString BuildRainAssets(int32 RainCount = 230000, int32 SplashCount = 15000);
+	static FString BuildRainAssets(int32 RainCount = 230000, int32 SplashCount = 15000, int32 StageCount = 60000);
 
 	/** Builds M_RainBasic (parameter material for stage props), M_WetGround (puddles + ripples) and
 	 *  M_NightSky (the night backdrop; needs Scripts/import_backdrop.py first). */
