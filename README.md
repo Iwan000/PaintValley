@@ -15,7 +15,7 @@ v9 的重点是让停住的雨读起来像水，而不是满屏发光的白点�
 - 雨滴是扁圆、会轻微晃动的水珠，中间有一个亮芯。
 - 换成了能凸显雨的机位，PIE 里按 `V` 切换。
 
-PIE 截图对比：`Renders/v9_pie_sheet.jpg`（v8 与 v9 同视角、四个新机位、下雨、乱舞）。成片仍是 v8 的 `Renders/RainTrick_v8.mp4`（46 秒，23.976 fps，2.39:1），镜头序列还没有按 v9 的机位重做。v6–v8 的成片和帧图都保留在 `Renders/` 下；从 v8 起每个版本在 git 里打了标签（`git checkout v8`）。
+PIE 截图对比：`Renders/v9_pie_sheet.jpg`（v8 与 v9 同视角、四个新机位、下雨、乱舞）。`Renders/v9_hover_static_hero.mp4` 是主机位固定不动、悬停 4 秒的片段（MRQ），用来看有没有频闪和闪烁：整体亮度逐帧变化在 0.1% 以内，逐像素的变化都是雨滴被手势缓慢拨动的轨迹。成片仍是 v8 的 `Renders/RainTrick_v8.mp4`（46 秒，23.976 fps，2.39:1），镜头序列还没有按 v9 的机位重做。v6–v8 的成片和帧图都保留在 `Renders/` 下；从 v8 起每个版本在 git 里打了标签（`git checkout v8`）。
 
 ## 目录
 
