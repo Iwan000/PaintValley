@@ -509,7 +509,19 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 	{
 		return;
 	}
-	UNiagaraComponent* NC = RainActor ? RainActor->GetNiagaraComponent() : nullptr;
+	// The film rain and any other rain that shares its look (the game's).
+	TArray<UNiagaraComponent*, TInlineAllocator<4>> Rains;
+	if (UNiagaraComponent* Main = RainActor ? RainActor->GetNiagaraComponent() : nullptr)
+	{
+		Rains.Add(Main);
+	}
+	for (UNiagaraComponent* Extra : ExtraRainComponents)
+	{
+		if (Extra)
+		{
+			Rains.Add(Extra);
+		}
+	}
 	const FVector Cam = View.Location;
 	Inst->SetVectorParameterValue(TEXT("CamPos"), FLinearColor(Cam.X, Cam.Y, Cam.Z, 0.0f));
 	Inst->SetVectorParameterValue(TEXT("Look"), FLinearColor(EnvGain, GlintGain, StreakGain, DropExposure));
@@ -546,14 +558,14 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dP"), i), P);
 		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dC"), i), C);
 		Inst->SetVectorParameterValue(*FString::Printf(TEXT("L%dD"), i), D);
-		if (NC)
+		for (UNiagaraComponent* NC : Rains)
 		{
 			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dP"), i), FVector4(P.R, P.G, P.B, P.A));
 			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dC"), i), FVector4(C.R * ScatterGain, C.G * ScatterGain, C.B * ScatterGain, C.A));
 			NC->SetVariableVec4(*FString::Printf(TEXT("RainL%dD"), i), FVector4(D.R, D.G, D.B, D.A));
 		}
 	}
-	if (NC)
+	for (UNiagaraComponent* NC : Rains)
 	{
 		// The rain field's window follows this camera (Niagara/HLSL/RainField.hlsl).
 		NC->SetVariableVec3(TEXT("RainCameraPos"), Cam);
@@ -576,7 +588,7 @@ void ARainMagicController::PushLightsAndCamera(const FRainView& View)
 		// Things at infinity blur to a disc of aperture / focus distance radians (the night backdrop).
 		BackdropBlur = Aperture / Focus * DofScale;
 		LensFocus = Focus;
-		if (NC)
+		for (UNiagaraComponent* NC : Rains)
 		{
 			NC->SetVariableFloat(TEXT("RainFocusDist"), Focus);
 			NC->SetVariableFloat(TEXT("RainAperture"), Aperture);
@@ -655,9 +667,12 @@ void ARainMagicController::StepPerformance(float DeltaSeconds)
 		return;
 	}
 	LastTickFrame = GFrameCounter;
-	HandleInteractiveInput();
+	if (!bGameMode)
+	{
+		HandleInteractiveInput();
+	}
 
-	if (Control == ERainControl::Performance && bAutoAdvance && !bPaused)
+	if (Control == ERainControl::Performance && bAutoAdvance && !bPaused && !bGameMode)
 	{
 		PerformanceTime += DeltaSeconds;
 		if (bLoop && PerformanceTime > PerformanceLength)
@@ -671,7 +686,7 @@ void ARainMagicController::StepPerformance(float DeltaSeconds)
 	ApplyState(DeltaSeconds, View);
 
 	UWorld* World = GetWorld();
-	if (bShowHelp && bInteractive && World && World->IsGameWorld())
+	if (bShowHelp && bInteractive && !bGameMode && World && World->IsGameWorld())
 	{
 		ShowHelp();
 	}

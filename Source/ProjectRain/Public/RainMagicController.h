@@ -91,6 +91,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|References")
 	TObjectPtr<AActor> ViewCamera;
 
+	/** Other rain systems that take this controller's per-frame look inputs (camera, lens, lamps): the Rain
+	 *  Shield game's rain (RainShieldGame) registers its component here. */
+	UPROPERTY(Transient, BlueprintReadWrite, Category = "Rain|References")
+	TArray<TObjectPtr<class UNiagaraComponent>> ExtraRainComponents;
+
+	/** Set by the Rain Shield game: the trick's keys and help, its timeline and the view target are the game's. */
+	UPROPERTY(Transient, BlueprintReadWrite, Category = "Rain|References")
+	bool bGameMode = false;
+
 	/** Framings to look at the rain from in PIE / game: V switches the view to the next one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rain|References")
 	TArray<TObjectPtr<AActor>> ShowcaseCameras;

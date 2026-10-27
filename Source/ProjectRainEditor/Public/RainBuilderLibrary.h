@@ -21,6 +21,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildRainAssets(int32 RainCount = 230000, int32 SplashCount = 15000, int32 StageCount = 60000);
 
+	/** Builds NS_RainGame, the Rain Shield game's rain (System 1: GPU sprites): RainCount drops by default
+	 *  (User.RainGameCount, changed at runtime by rain.game.Count), falling in the player's direction through
+	 *  the play grid's boxes, hits read back with Export Particle Data. Needs BuildRainAssets first (M_RainDrop). */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString BuildRainGameAssets(int32 RainCount = 200000);
+
 	/** Builds M_RainBasic (parameter material for stage props), M_WetGround (puddles + ripples) and
 	 *  M_NightSky (the night backdrop; needs Scripts/import_backdrop.py first). */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
