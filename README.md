@@ -1,3 +1,96 @@
+# Rain Shield — Niagara at Scale (course project)
+
+A puzzle game where **Niagara particles decide the outcome**. A shape floats in a 10×10×10 grid. You place the blocker pieces the level gives you, pick the direction the weather comes from (26 directions, locked once it starts), and then it falls for a fixed time. Every drop that reaches the shape is read back from the simulation; how wet the shape gets decides the stars. It borrows from *Auditorium* (particle streams shaped by placed geometry).
+
+The same mechanic has two configurations; press **G** to switch between them while planning:
+
+| | System 1: rain (simple, many) | System 2: hail (complex, few) |
+|---|---|---|
+| Asset | `NS_RainGame` | `NS_RainHail` (CPU), `NS_RainHailGPU` (the same HLSL on the GPU) |
+| Simulation, renderer | GPU compute, sprites (the film rain's drop shading) | CPU (VectorVM), meshes |
+| Count | 200,000 (`rain.game.Count`) | 2,000 (`rain.game.HailCount`) |
+| Per-particle logic | 3 rules: fall along the chosen direction; divergence-free (ABC) gusts; swept collision against the grid's boxes. Blockers absorb drops | Gravity and drag; swept sphere-vs-box collision with bounce and friction; state machine (falling, bouncing, resting, melting); impact events |
+| Back to gameplay | Each hit on the shape → Export Particle Data (GPU readback) → score | Each impact → Export Particle Data → hit on the shape, or damage to a blocker (it breaks at 0 hit points) |
+
+**Performance report:** `Docs/PerformanceReport.pdf` (2 pages). Data: `Docs/Perf/*.csv`. Profiler captures: `Docs/Perf/*.jpg`.
+
+## Build and run
+
+Built and tested only on **macOS 26 with an Apple M2 Pro and Unreal Engine 5.7** (Metal). The project is C++; the code doesn't depend on the platform, but no other platform was tried.
+
+1. Build the editor target:
+   ```sh
+   "<UE_5.7>/Engine/Build/BatchFiles/Mac/Build.sh" ProjectRainEditor Mac Development -Project="$PWD/ProjectRain.uproject" -WaitMutex
+   ```
+   On Windows, run `Build.bat ProjectRainEditor Win64 Development ...`, or open the generated solution.
+2. Open `ProjectRain.uproject`, open **`/Game/RainMagic/Maps/L_RainShield`** and press Play. It is also the game's default map.
+3. All assets are generated from code and the generated `.uasset` files are committed, so step 3 is optional. To regenerate them, run this in the editor's Python console:
+   ```python
+   import unreal
+   L = unreal.RainBuilderLibrary
+   L.build_rain_assets(230000, 15000, 60000)   # film rain + the drop material the game reuses
+   L.build_stage_materials()
+   L.build_rain_game_assets(200000)            # NS_RainGame (System 1)
+   L.build_rain_hail_assets(2000)              # NS_RainHail + NS_RainHailGPU (System 2), M_Hail
+   ```
+   The game level is `L_RainStage` copied on disk, plus the game actor (`Scripts/build_game_map.py`).
+
+## Controls
+
+| Key | While planning | While it falls / after |
+|---|---|---|
+| W A S D, Q E | move the piece (along the grid axes nearest the view), down/up | — |
+| R / T | rotate the piece about the vertical / the view's horizontal axis | R: back to planning with the same pieces |
+| Tab, Space, Backspace | next piece, place it, undo | — |
+| 1–6, Z / X | rain direction: the six axes / step through all 26 | — |
+| G | rain ↔ hail | — |
+| Enter | start (locks the direction) | next level (or retry when too wet) |
+| Right mouse drag or arrow keys, wheel | orbit, zoom | orbit, zoom |
+| PageUp / PageDown | next / previous level | next / previous level |
+
+**Wetness** = hits ÷ the hits an unshielded shape of the same outline would take (computed from the drop density and fall speed, so it doesn't change with the particle count). Stars: ≤ 4 %, ≤ 12 %, ≤ 30 %.
+
+## Console variables and commands
+
+| Name | Default | What it does |
+|---|---|---|
+| `rain.game.Count <n>` | 200000 | Rain drops (System 1). Reinitialises the system with exactly *n* particles; the HUD shows requested vs live. |
+| `rain.game.HailCount <n>` | 2000 | Hailstones (System 2). |
+| `rain.game.Mode 0/1` | 0 | Rain / hail (the G key). |
+| `rain.game.HailGPU 0/1` | 0 | Hail simulated on the CPU (`NS_RainHail`) or on the GPU (`NS_RainHailGPU`). This is the CPU → GPU port measured in the report. |
+| `rain.game.PauseUnselected 0/1` | 1 | 1 pauses and hides the system that isn't selected. 0 is the "before" of that optimisation. |
+| `rain.game.Sweep [hail] [counts…] [settle=s] [measure=s]` | — | Scaling sweep. For each count it waits for the live count, measures frame, game-thread, render-thread and GPU time (`stat unit`) and Niagara game/render-thread time (per-system particle perf stats), then writes `Saved/Sweeps/RainShield_<system>_<time>.csv`. Default counts: rain 0, 50k, 100k, 200k, 400k, 800k, 1.6M; hail 0, 500, 1k, 2k, 5k, 10k, 20k, 40k. |
+
+Engine tools used in the report: `stat unit`, `stat Niagara`, `NiagaraDebugHud 1`, `ProfileGPU`, and Unreal Insights (`-trace=default,gpu`). `stat GPU` shows nothing on Metal.
+
+## Reproducing the numbers
+
+Standalone, 1920×1080, 100 % screen percentage. The sweep sets `r.ScreenPercentage 100`, uncapped frame rate and vsync off by itself, then quits:
+
+```sh
+<UnrealEditor> ProjectRain.uproject /Game/RainMagic/Maps/L_RainShield -game -windowed -ResX=1920 -ResY=1080 -ForceRes \
+    -RainSweep=0,50000,100000,200000,400000,800000,1600000 -RainSweepQuit                          # System 1
+    -RainSweep=hail:0,500,1000,2000,5000,10000,20000,40000 -RainSweepQuit [-RainHailGPU]           # System 2 (CPU / GPU port)
+    ... -RainNoPauseUnselected                                                                     # the optimisation's "before"
+```
+
+On this Mac: `Scripts/sweep.sh rain|hail|hailgpu` (closes the editor first, prints the CSV), `Scripts/capture.sh` (stat overlays), `python3 Scripts/plot_perf.py` (figure), `Scripts/build_report.sh` (PDF). In PIE, `rain.game.Sweep` does the same in the editor viewport, where the numbers are lower.
+
+## Code
+
+| Path | What |
+|---|---|
+| `Source/ProjectRain/Public/RainShieldGame.h`, `Private/RainShieldGame.cpp` | The game: levels, grid and pieces, rounds and scoring, the readback callback (`ReceiveParticleData`), blocker damage, orbit camera, HUD, cvars, sweeps |
+| `Source/ProjectRain/Public/RainShieldTypes.h` | Constants shared by the game and the asset builder (box count, drop and hail sizes, export capacity) |
+| `Niagara/HLSL/GameRainSpawn.hlsl`, `GameRainUpdate.hlsl` | System 1 (+ `RainLook.hlsl`, the drop shape/streak/lens/lamp tail shared with the film rain) |
+| `Niagara/HLSL/HailSpawn.hlsl`, `HailUpdate.hlsl` | System 2. Branch-free for the VectorVM; the comments list the VM pitfalls hit (safe division, swizzle writes, branch flattening) |
+| `Source/ProjectRainEditor/Private/RainAssetBuilder.cpp` | Builds every Niagara system, module and material from the HLSL above (`BuildRainGameAssets`, `BuildRainHailAssets`) |
+| `Source/ProjectRain/Private/RainMagicController.cpp` | The film rain's controller. In the game it supplies the drops' camera, lens and lamp inputs (`ExtraRainComponents`, `bGameMode`) |
+
+The rest of this README documents the original *Project Rain* (the film's rain-stopping trick, in Chinese).
+
+---
+
 # Project Rain
 
 用 UE 5.7 Niagara 从零复刻《惊天魔盗团2》（*Now You See Me 2*，2016）终场里 J. Daniel Atlas 的控雨魔术：雨在半空停住、悬停、被手势拨动、乱舞、升回天空，最后重新落下。目标是粒子效果本身，舞台只为雨提供灯光和背景。
