@@ -1,5 +1,6 @@
 ---
 title: "Rain Shield — Niagara at Scale: Performance Report"
+author: "Iwan000 · cg401@duke.edu · Oct 2026"
 ---
 
 **Rain Shield** (UE 5.7, C++ + Niagara). A shape floats in a 10³ grid. The player places the blocker pieces the level gives them and picks the direction the weather comes from (26 directions, locked once it starts). Then the weather falls for a fixed time, and the stars depend on how wet the shape gets. The mechanic borrows from *Auditorium*: particle streams shaped by the geometry the player places. Two configurations of the same mechanic switch at runtime (G):
@@ -15,7 +16,7 @@ title: "Rain Shield — Niagara at Scale: Performance Report"
 
 ## Budget and method
 
-**Budget, stated before building:** 60 fps (16.6 ms) at 1920×1080, with Niagara ≤ 4 ms on the game and render threads combined. As a working sub-budget, the particles may use ≤ 4 ms of GPU.
+**Target budget:** 60 fps (16.6 ms) at 1920×1080, with Niagara ≤ 4 ms on the game and render threads combined. As a working sub-budget, the particles may use ≤ 4 ms of GPU.
 
 **Method:**
 
@@ -40,7 +41,7 @@ title: "Rain Shield — Niagara at Scale: Performance Report"
 ## Scaling and breaking points
 
 - **The scene alone misses 60 fps on this Mac.** With no particles the frame takes 26.5 ms. ProfileGPU at 200k drops: post-processing 13.7 ms (Metal lumps nested passes into it), deferred lighting 6.6 ms, Niagara GPU simulation 4.1 ms, rain translucency 4.1 ms, sort 0.2 ms.
-  Particles are not what breaks 60 fps here, and per the brief the miss is explained rather than hidden. A GPU 2–3× faster, typical of a lab PC, should bring the scene under 10 ms, but that is a projection, not a measurement.
+  Particles are not what breaks 60 fps here, and per the brief the miss is explained rather than hidden. On a GPU 2–3× faster, typical of a lab PC, the scene would take roughly 9–13 ms; that is a projection, not a measurement.
 - **System 1 is GPU-bound and linear:** 4.4 ms of GPU per 100k drops, about 44 ns per drop: simulation with 32 box tests and readback, sort, then the translucent sprite draw.
   - Niagara's CPU cost stays at 0.1 ms all the way to 1.6M drops, so the 4 ms Niagara budget never breaks.
   - The 4 ms particle GPU sub-budget breaks at about **95k drops**. The default of 200k drops costs 9.1 ms.

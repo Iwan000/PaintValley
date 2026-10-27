@@ -13,7 +13,7 @@ The same mechanic has two configurations; press **G** to switch between them whi
 | Back to gameplay | Each hit on the shape → Export Particle Data (GPU readback) → score | Each impact → Export Particle Data → hit on the shape, or damage to a blocker (it breaks at 0 hit points) |
 
 **Performance report:** `Docs/PerformanceReport.pdf` (2 pages). Data: `Docs/Perf/*.csv`. Profiler captures: `Docs/Perf/*.jpg`.
-**Video:** `Renders/RainShield_video.mp4` (90 s, 1080p; video files are not in git). It is a recording of the scripted tour `-RainDemo` (`Scripts/record_demo.sh`). The stat overlay segment shows `stat unit` and the Niagara debug HUD while the particle count changes live.
+**Video:** `Renders/RainShield_video.mp4` (90 s, 1080p; video files are not in git). It is a recording of the scripted tour `-RainDemo` (`Scripts/record_demo.sh`). The stat overlay segment shows `stat unit` and the Niagara debug HUD while the particle count changes live. The video was recorded in a 1600×900 window at the automatic screen percentage (the overlay shows a render resolution of 83.4%, 1336×751), so its frame times are not the report's 1080p numbers.
 
 ## Build and run
 
@@ -50,6 +50,16 @@ Built and tested only on **macOS 26 with an Apple M2 Pro and Unreal Engine 5.7**
 | PageUp / PageDown | next / previous level | next / previous level |
 
 **Wetness** = hits ÷ the hits an unshielded shape of the same outline would take (computed from the drop density and fall speed, so it doesn't change with the particle count). Stars: ≤ 4 %, ≤ 12 %, ≤ 30 %.
+
+Every level was played to its result in both modes with a sensible placement from above (`Scripts/gamelib.py`, `play_level`):
+
+| Level | Rain | Hail |
+|---|---|---|
+| 1 Cube | 3 stars, 0 % wet | 3 stars, 3.0 % wet, plate held |
+| 2 Lamp post | 3 stars, 2.5 % wet | 1 star, 25 % wet, both pieces broken |
+| 3 Arch | 3 stars, 3.3 % wet | 1 star, 20 % wet, 2 pieces broken |
+
+Hail is the harder mode: stones bounce off the edges and wear the blockers down.
 
 ## Console variables and commands
 

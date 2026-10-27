@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Iwan000 · cg401@duke.edu · Oct 2026" />
   <title>Rain Shield — Niagara at Scale: Performance Report</title>
   <style>
 code{white-space: pre-wrap;}
@@ -36,12 +37,14 @@ table { border-collapse: collapse; margin: 3pt 0 5pt; font-size: 7.8pt; width: 1
 th, td { border-bottom: 0.5pt solid #e1e0db; padding: 1.5pt 4pt; }
 th { text-align: left; color: #6b6b67; font-weight: 600; }
 td:nth-child(n+2) { text-align: right; font-variant-numeric: tabular-nums; }
+header p.author { font-size: 8pt; color: #6b6b67; margin: 0 0 6pt; }
 </style>
 </head>
 <body>
 <header id="title-block-header">
 <h1 class="title">Rain Shield — Niagara at Scale: Performance
 Report</h1>
+<p class="author">Iwan000 · cg401@duke.edu · Oct 2026</p>
 </header>
 <p><strong>Rain Shield</strong> (UE 5.7, C++ + Niagara). A shape floats
 in a 10³ grid. The player places the blocker pieces the level gives them
@@ -79,9 +82,9 @@ shape count as hits; impacts on a blocker drain its hit points, and when
 they run out the game removes the piece and re-uploads the boxes.</li>
 </ul>
 <h2 id="budget-and-method">Budget and method</h2>
-<p><strong>Budget, stated before building:</strong> 60 fps (16.6 ms) at
-1920×1080, with Niagara ≤ 4 ms on the game and render threads combined.
-As a working sub-budget, the particles may use ≤ 4 ms of GPU.</p>
+<p><strong>Target budget:</strong> 60 fps (16.6 ms) at 1920×1080, with
+Niagara ≤ 4 ms on the game and render threads combined. As a working
+sub-budget, the particles may use ≤ 4 ms of GPU.</p>
 <p><strong>Method:</strong></p>
 <ul>
 <li><strong>Machine:</strong> MacBook Pro M2 Pro, 32 GB, Metal SM6; UE
@@ -174,8 +177,8 @@ particles the frame takes 26.5 ms. ProfileGPU at 200k drops:
 post-processing 13.7 ms (Metal lumps nested passes into it), deferred
 lighting 6.6 ms, Niagara GPU simulation 4.1 ms, rain translucency 4.1
 ms, sort 0.2 ms. Particles are not what breaks 60 fps here, and per the
-brief the miss is explained rather than hidden. A GPU 2–3× faster,
-typical of a lab PC, should bring the scene under 10 ms, but that is a
+brief the miss is explained rather than hidden. On a GPU 2–3× faster,
+typical of a lab PC, the scene would take roughly 9–13 ms; that is a
 projection, not a measurement.</li>
 <li><strong>System 1 is GPU-bound and linear:</strong> 4.4 ms of GPU per
 100k drops, about 44 ns per drop: simulation with 32 box tests and

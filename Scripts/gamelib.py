@@ -46,3 +46,32 @@ def shot(name, w=1920, h=1080):
 def ui_shot():
     """Screenshot of the PIE viewport with the HUD (on-screen messages) -> Saved/Screenshots/MacEditor/ScreenShotNNNNN.png."""
     console("Shot showui")
+
+
+# Known-good placements, all for weather falling straight down (direction 0): per level, per piece, the moves
+# from the piece's starting spot (above the middle of the grid) before placing it.
+GOOD_MOVES = {
+    0: [[]],                                   # Cube: the 4x4 plate right above it
+    1: [[(0, 1, 0)], [(0, 0, -2)]],            # Lamp post: the bar over the post and arm, the 2x2 plate below it
+    2: [[], [(3, 0, 0)], [(0, 0, -2)]],        # Arch: 3x3 plate + L plate over the lintel, the block under them
+}
+
+
+def play_level(level, hail):
+    """Starts a round of a level with its known-good placement (call status() after its duration)."""
+    g = game()
+    g.start_level(level)
+    g.set_hail_mode(hail)
+    g.set_direction(0)
+    for moves in GOOD_MOVES[level]:
+        for m in moves:
+            g.move_piece(unreal.IntVector(*m))
+        if not g.place_piece():
+            print("PLACE FAILED level", level)
+    g.start_round()
+
+
+def result():
+    g = game()
+    print("RESULT phase=%s hits=%d wet=%.4f stars=%d broken=%d live=%d hail=%s" % (g.get_phase(), g.get_hits(), g.get_wetness(), g.get_stars(),
+          g.get_broken_blockers(), g.get_live_particle_count(), g.is_hail_mode()))

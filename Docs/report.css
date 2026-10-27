@@ -13,3 +13,4 @@ table { border-collapse: collapse; margin: 3pt 0 5pt; font-size: 7.8pt; width: 1
 th, td { border-bottom: 0.5pt solid #e1e0db; padding: 1.5pt 4pt; }
 th { text-align: left; color: #6b6b67; font-weight: 600; }
 td:nth-child(n+2) { text-align: right; font-variant-numeric: tabular-nums; }
+header p.author { font-size: 8pt; color: #6b6b67; margin: 0 0 6pt; }
