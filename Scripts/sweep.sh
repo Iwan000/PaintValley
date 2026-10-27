@@ -4,6 +4,7 @@
 #   Scripts/sweep.sh hail               # System 2 on the CPU: 0 500 1k 2k 5k 10k 20k 40k stones
 #   Scripts/sweep.sh hailgpu            # System 2 on the GPU (the CPU -> GPU port)
 #   COUNTS=0,1000,2000 Scripts/sweep.sh hail    # other levels
+#   EXTRA_ARGS=-RainNoPauseUnselected Scripts/sweep.sh hail   # the "before" of pausing the unselected system
 # Closes a running editor first (it would share the GPU). Results: Saved/Sweeps/RainShield_<system>_<time>.csv
 # (also printed). Each level: 3 s to settle (count checked against the live particle count), 5 s measured.
 UE="/Users/Shared/Epic Games/UE_5.7"
@@ -17,5 +18,5 @@ case $MODE in
 esac
 pkill -9 -f "UnrealEditor.app/Contents/MacOS/UnrealEditor"; sleep 2
 "$UE/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor" "$PROJ" /Game/RainMagic/Maps/L_RainShield -game -windowed \
-  -ResX=1920 -ResY=1080 -ForceRes -RainSweep=$ARG -RainSweepQuit ${=EXTRA} -NoSplash -unattended -log=Sweep.log > /dev/null 2>&1
+  -ResX=1920 -ResY=1080 -ForceRes -RainSweep=$ARG -RainSweepQuit ${=EXTRA} ${=EXTRA_ARGS} -NoSplash -unattended -log=Sweep.log > /dev/null 2>&1
 CSV=$(ls -t /Users/guocheng/ProjectRain/Saved/Sweeps/*.csv | head -1); echo "$CSV"; column -t -s, "$CSV"

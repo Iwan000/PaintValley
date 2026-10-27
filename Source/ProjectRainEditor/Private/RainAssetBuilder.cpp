@@ -852,7 +852,7 @@ namespace
 		Float(TEXT("RainGameActive"), 0.0f);
 		Float(TEXT("RainGameScoring"), 0.0f);
 		Float(TEXT("RainGameGust"), 60.0f);
-		// Boxes as Vec3 + float, no Vec4: on the CPU (VectorVM) every user parameter after a Vec4 read back shifted.
+		// Boxes as Vec3 min, Vec3 max and a float kind (the same for both systems; the CPU hail reads them all).
 		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
 		{
 			Vec3(*FString::Printf(TEXT("RainBox%dMin"), i), FVector3f(1e6f));

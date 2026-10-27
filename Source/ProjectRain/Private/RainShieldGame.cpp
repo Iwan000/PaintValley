@@ -61,6 +61,13 @@ static TAutoConsoleVariable<int32> CVarRainGameHailGPU(
 	TEXT("Rain Shield: 0 simulates the hail on the CPU (NS_RainHail), 1 on the GPU (NS_RainHailGPU, the same HLSL): the CPU -> GPU port."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRainGamePauseUnselected(
+	TEXT("rain.game.PauseUnselected"),
+	1,
+	TEXT("Rain Shield: 1 pauses and hides the weather system that is not selected (the measured optimisation); 0 keeps both\n")
+	TEXT("simulating and drawing their parked, invisible particles (the 'before')."),
+	ECVF_Default);
+
 static FAutoConsoleCommandWithWorldAndArgs GRainGameSweep(
 	TEXT("rain.game.Sweep"),
 	TEXT("Rain Shield: steps the rain (or, with 'hail', the hail) through particle counts and writes frame / game thread / render thread / GPU / Niagara times to Saved/Sweeps/*.csv.\n")
@@ -407,6 +414,10 @@ void ARainShieldGame::BeginPlay()
 	{
 		CVarRainGameHailGPU->Set(1);
 	}
+	if (FParse::Param(FCommandLine::Get(), TEXT("RainNoPauseUnselected")))
+	{
+		CVarRainGamePauseUnselected->Set(0);
+	}
 	HailCount = FMath::Max(CVarRainGameHailCount.GetValueOnGameThread(), 0);
 	bHailMode = CVarRainGameMode.GetValueOnGameThread() == 1;
 	bHailGpu = CVarRainGameHailGPU.GetValueOnGameThread() == 1;
@@ -417,7 +428,7 @@ void ARainShieldGame::BeginPlay()
 	StartLevel(0);
 
 	// Reproducible sweeps from the command line (standalone 1080p runs, see README):
-	//   -RainSweep=0,50000,... (or -RainSweep=hail:0,500,...)  -RainSweepQuit
+	//   -RainSweep=0,50000,... (or -RainSweep=hail:0,500,...)  -RainSweepQuit  -RainSweepSettle=<s>  -RainSweepMeasure=<s>
 	FString Sweep;
 	if (FParse::Value(FCommandLine::Get(), TEXT("RainSweep="), Sweep, false))
 	{
@@ -590,8 +601,9 @@ void ARainShieldGame::UploadRain()
 	for (UNiagaraComponent* System : { Rain.Get(), Hail.Get() })
 	{
 		const bool bSelected = System == ActiveSystem();
-		System->SetPaused(!bSelected);
-		System->SetVisibility(bSelected);
+		const bool bRun = bSelected || CVarRainGamePauseUnselected.GetValueOnGameThread() == 0;
+		System->SetPaused(!bRun);
+		System->SetVisibility(bRun);
 		System->SetVariableVec3(TEXT("RainGameDir"), Direction());
 		System->SetVariableVec3(TEXT("RainGameCenter"), GridCenter());
 		System->SetVariableFloat(TEXT("RainGameHalf"), StreamHalf());
@@ -962,6 +974,12 @@ void ARainShieldGame::Tick(float DeltaSeconds)
 			bHailGpu = bWantGpu;
 			ApplyHailAsset();
 		}
+		static int32 LastPause = 1;
+		if (CVarRainGamePauseUnselected.GetValueOnGameThread() != LastPause)
+		{
+			LastPause = CVarRainGamePauseUnselected.GetValueOnGameThread();
+			UploadRain();
+		}
 		const bool bWantHail = CVarRainGameMode.GetValueOnGameThread() == 1;
 		static bool bLastWantHail = false;
 		if (bWantHail != bLastWantHail)
@@ -975,7 +993,10 @@ void ARainShieldGame::Tick(float DeltaSeconds)
 		PendingSweepDelay -= float(FApp::GetDeltaTime());
 		if (PendingSweepDelay <= 0.0f)
 		{
-			StartSweep(PendingSweep, bPendingSweepHail);
+			float Settle = 3.0f, Measure = 5.0f;
+			FParse::Value(FCommandLine::Get(), TEXT("RainSweepSettle="), Settle);
+			FParse::Value(FCommandLine::Get(), TEXT("RainSweepMeasure="), Measure);
+			StartSweep(PendingSweep, bPendingSweepHail, Settle, Measure);
 		}
 	}
 	FlashTime -= DeltaSeconds;
@@ -1235,6 +1256,11 @@ void ARainShieldGame::StartSweep(const TArray<int32>& Counts, bool bHail, float 
 		GEngine->Exec(GetWorld(), TEXT("t.MaxFPS 0"));
 		GEngine->Exec(GetWorld(), TEXT("r.VSync 0"));
 		GEngine->Exec(GetWorld(), TEXT("fx.ParticlePerfStats.Enabled 1"));
+		// Render at the window's full resolution: by default the desktop screen percentage follows the display
+		// (72.9% of 1920x1080 on a Retina Mac).
+		GEngine->Exec(GetWorld(), TEXT("r.ScreenPercentage.Default.Desktop.Mode 0"));
+		GEngine->Exec(GetWorld(), TEXT("r.ScreenPercentage 100"));
+		GEngine->Exec(GetWorld(), TEXT("r.DynamicRes.OperationMode 0"));
 		if (GEngine->GameViewport && !GEngine->GameViewport->IsStatEnabled(TEXT("Unit")))
 		{
 			GEngine->Exec(GetWorld(), TEXT("stat unit"));
@@ -1253,7 +1279,7 @@ void ARainShieldGame::StartSweep(const TArray<int32>& Counts, bool bHail, float 
 	SweepCounts = Counts;
 	SweepSettle = FMath::Max(SettleSeconds, 0.5f);
 	SweepMeasure = FMath::Max(MeasureSeconds, 0.5f);
-	SweepCsv = TEXT("system,count_requested,count_live,frames,frame_ms,frame_ms_max,fps,game_thread_ms,render_thread_ms,gpu_ms,niagara_gt_ms,niagara_rt_ms,niagara_gpu_ms,events_per_s,resolution\n");
+	SweepCsv = TEXT("system,count_requested,count_live,frames,frame_ms,frame_ms_max,fps,game_thread_ms,render_thread_ms,gpu_ms,niagara_gt_ms,niagara_rt_ms,niagara_gpu_ms,events_per_s,resolution,screen_percentage\n");
 	bSweepMeasuring = false;
 	SweepTimer = 0.0f;
 	bHail ? SetHailCount(SweepCounts[0]) : SetRainCount(SweepCounts[0]);
@@ -1331,10 +1357,12 @@ void ARainShieldGame::FinishSweepLevel()
 	}
 	const TCHAR* SystemName = bSweepHail ? (bHailGpu ? TEXT("System2_hail_GPU_meshes") : TEXT("System2_hail_CPU_meshes")) : TEXT("System1_rain_GPU_sprites");
 	const double FrameMs = SweepFrameMs / N;
-	const FString Row = FString::Printf(TEXT("%s,%d,%d,%d,%.3f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%dx%d\n"),
+	static IConsoleVariable* ScreenPercentage = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
+	const FString Row = FString::Printf(TEXT("%s,%d,%d,%d,%.3f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%dx%d,%.0f\n"),
 		SystemName, bSweepHail ? HailCount : RainCount, LiveCount(Target), SweepFrames, FrameMs, SweepFrameMsMax, 1000.0 / FMath::Max(FrameMs, 1e-3),
 		SweepGameMs / N, SweepRenderMs / N, SweepGpuMs / N, NiagaraGt, NiagaraRt, NiagaraGpu,
-		(Hits + BlockerImpacts - SweepHitsAtStart) / FMath::Max(SweepTimer, 1e-3f), Resolution.X, Resolution.Y);
+		(Hits + BlockerImpacts - SweepHitsAtStart) / FMath::Max(SweepTimer, 1e-3f), Resolution.X, Resolution.Y,
+		ScreenPercentage ? ScreenPercentage->GetFloat() : 0.0f);
 	SweepCsv += Row;
 	UE_LOG(LogTemp, Display, TEXT("rain.game.Sweep %s"), *Row.TrimEnd());
 
