@@ -585,10 +585,13 @@ void ARainShieldGame::UploadBoxes(bool bWithBlockers)
 
 void ARainShieldGame::UploadRain()
 {
-	// Both systems share the stream; only the selected one falls.
+	// Both systems share the stream; only the selected one falls. The other is paused and hidden: parked particles
+	// still cost simulation, sorting and draw submission (200k parked drops were ~4 ms of GPU at 1080p).
 	for (UNiagaraComponent* System : { Rain.Get(), Hail.Get() })
 	{
 		const bool bSelected = System == ActiveSystem();
+		System->SetPaused(!bSelected);
+		System->SetVisibility(bSelected);
 		System->SetVariableVec3(TEXT("RainGameDir"), Direction());
 		System->SetVariableVec3(TEXT("RainGameCenter"), GridCenter());
 		System->SetVariableFloat(TEXT("RainGameHalf"), StreamHalf());

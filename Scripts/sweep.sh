@@ -16,8 +16,6 @@ case $MODE in
   *) echo "usage: sweep.sh rain|hail|hailgpu"; exit 1 ;;
 esac
 pkill -9 -f "UnrealEditor.app/Contents/MacOS/UnrealEditor"; sleep 2
-LOG="$HOME/Library/Logs/Unreal Engine/ProjectRainEditor/Sweep.log"
-rm -f "$LOG"
 "$UE/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor" "$PROJ" /Game/RainMagic/Maps/L_RainShield -game -windowed \
-  -ResX=1920 -ResY=1080 -RainSweep=$ARG -RainSweepQuit ${=EXTRA} -NoSplash -unattended -log=Sweep.log > /dev/null 2>&1
-grep "rain.game.Sweep" "$LOG" | sed 's/.*rain.game.Sweep[: ]*//'
+  -ResX=1920 -ResY=1080 -ForceRes -RainSweep=$ARG -RainSweepQuit ${=EXTRA} -NoSplash -unattended -log=Sweep.log > /dev/null 2>&1
+CSV=$(ls -t /Users/guocheng/ProjectRain/Saved/Sweeps/*.csv | head -1); echo "$CSV"; column -t -s, "$CSV"
