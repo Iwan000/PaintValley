@@ -1,7 +1,11 @@
 // Project Rain - Rain Shield: the game. A shape floats in a 3D grid; the player places the blocker pieces the
-// level gives them, picks the direction the rain falls from, and then the rain (NS_RainGame, GPU sprites) falls
-// for a fixed time. Blockers absorb drops; every drop that reaches the shape is read back from the GPU
-// (Export Particle Data -> ReceiveParticleData) and the shape's wetness decides the level's stars.
+// level gives them, picks the direction the weather comes from, and then it falls for a fixed time. Two
+// configurations of the same mechanic, switched at runtime (G):
+//   System 1, rain (NS_RainGame): 200k GPU sprites. Blockers absorb drops; every drop that reaches the shape is
+//     read back from the GPU (Export Particle Data -> ReceiveParticleData). Its wetness decides the stars.
+//   System 2, hail (NS_RainHail, CPU; NS_RainHailGPU, the same HLSL on the GPU): 2k meshes that bounce off
+//     blockers, come to rest and melt. Their impacts come back as events: on the shape they count like rain,
+//     on a blocker they wear it down until it breaks.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -71,10 +75,14 @@ public:
 
 	// ------------------------------------------------------------------ components and references
 	UPROPERTY(VisibleAnywhere, Category = "Rain Shield") TObjectPtr<UNiagaraComponent> Rain;
+	UPROPERTY(VisibleAnywhere, Category = "Rain Shield") TObjectPtr<UNiagaraComponent> Hail;
 	UPROPERTY(VisibleAnywhere, Category = "Rain Shield") TObjectPtr<UInstancedStaticMeshComponent> ProtectedCubes;
 	UPROPERTY(VisibleAnywhere, Category = "Rain Shield") TObjectPtr<UInstancedStaticMeshComponent> BlockerCubes;
 
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") TSoftObjectPtr<UNiagaraSystem> RainSystem;
+	UPROPERTY(EditAnywhere, Category = "Rain Shield") TSoftObjectPtr<UNiagaraSystem> HailSystem;
+	/** The hail on the GPU (rain.game.HailGPU 1): the CPU -> GPU port measured in the report. */
+	UPROPERTY(EditAnywhere, Category = "Rain Shield") TSoftObjectPtr<UNiagaraSystem> HailSystemGPU;
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") TObjectPtr<UMaterialInterface> CubeMaterial;
 	/** The film rain's controller: lens, lamps and camera inputs for the drops' look (found in the level if unset). */
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") TObjectPtr<ARainMagicController> Controller;
@@ -88,6 +96,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") float Gust = 60.0f;
 	/** Wetness (hits / hits expected on the unshielded shape) for 3, 2 and 1 stars. */
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") FVector StarWetness = FVector(0.04, 0.12, 0.30);
+	/** Seconds a blocker cell lasts in the full hail (its hit points are this many seconds of the hail's impacts on
+	 *  one cell, so they scale with rain.game.HailCount and the game plays the same at any count). */
+	UPROPERTY(EditAnywhere, Category = "Rain Shield") float BlockerLifeSeconds = 24.0f;
 	UPROPERTY(EditAnywhere, Category = "Rain Shield") TArray<FRainShieldLevel> Levels;
 
 	// ------------------------------------------------------------------ camera
@@ -118,25 +129,36 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void SetDirection(int32 Index);
 	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void StartRound();
 	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void SetOrbit(float Yaw, float Pitch, float Distance);
+	/** Rain (System 1) or hail (System 2), while planning (rain.game.Mode does the same). */
+	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void SetHailMode(bool bHail);
+	UFUNCTION(BlueprintPure, Category = "Rain Shield") bool IsHailMode() const { return bHailMode; }
+	/** Hailstones (rain.game.HailCount does the same): reinitialises the hail system. */
+	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void SetHailCount(int32 Count);
 	/** Drops in the rain (rain.game.Count does the same): reinitialises the rain system. */
 	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void SetRainCount(int32 Count);
-	/** Measures frame, thread, GPU and Niagara times at each particle count (rain.game.Sweep). Writes a CSV to Saved/Sweeps. */
-	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void StartSweep(const TArray<int32>& Counts, float SettleSeconds = 3.0f, float MeasureSeconds = 5.0f);
+	/** Measures frame, thread, GPU and Niagara times at each particle count of the rain or the hail (rain.game.Sweep).
+	 *  Writes a CSV to Saved/Sweeps. */
+	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void StartSweep(const TArray<int32>& Counts, bool bHail = false, float SettleSeconds = 3.0f, float MeasureSeconds = 5.0f);
 
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") ERainShieldPhase GetPhase() const { return Phase; }
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetHits() const { return Hits; }
 	/** Hits / hits expected on the unshielded shape over the round so far. */
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") float GetWetness() const;
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetStars() const;
-	/** Particles alive in the rain right now (GPU count, read back by Niagara). */
+	/** Particles alive in the active system right now (rain: the GPU count, read back by Niagara). */
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetLiveParticleCount() const;
+	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetBrokenBlockers() const { return BrokenBlockers; }
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") FString GetLastSweepFile() const { return LastSweepFile; }
+	/** Debug: the first particles of the hail (CPU only) as text: position, velocity, state, radius, impact. */
+	UFUNCTION(BlueprintCallable, Category = "Rain Shield") FString DebugHailParticles(int32 Max = 8) const;
 
 private:
 	struct FPlaced
 	{
 		int32 Piece = 0;
 		TArray<FIntVector> Cells;
+		int32 HitPoints = 0;
+		int32 MaxHitPoints = 0;
 	};
 
 	FVector GridCenter() const;
@@ -148,9 +170,15 @@ private:
 	void ResetPiece(int32 Index);
 	void UploadBoxes(bool bWithBlockers);
 	void UploadRain();
+	UNiagaraComponent* ActiveSystem() const { return bHailMode ? Hail : Rain; }
+	static int32 LiveCount(const UNiagaraComponent* Component);
+	void SetupSystem(UNiagaraComponent* Component, UNiagaraSystem* System, int32 Count);
+	void ApplyHailAsset();
+	void OnHailImpacts(const TArray<FBasicParticleData>& Data, const FVector& Offset);
 	void RefreshCubes();
 	void EndRound();
 	float ExpectedHits(float Seconds) const;
+	int32 PieceHitPoints(int32 Cells) const;
 	float StreamHalf() const;
 	float StreamLength() const;
 	void HandleInput(float DeltaSeconds);
@@ -176,6 +204,13 @@ private:
 	int32 SaturatedCallbacks = 0;
 	int32 BoxesUsed = 0;
 	int32 RainCount = 0;
+	int32 HailCount = 0;
+	bool bHailMode = false;
+	bool bHailGpu = false;
+	int32 BrokenBlockers = 0;
+	int32 BlockerImpacts = 0;
+	FString Flash;
+	float FlashTime = 0.0f;
 	float ReferenceArea = 0.0f;
 	float MeanFallSpeed = 700.0f;
 	TArray<TPair<FVector, float>> RecentHits;
@@ -190,6 +225,11 @@ private:
 
 	// Sweep (rain.game.Sweep).
 	TArray<int32> SweepCounts;
+	bool bSweepHail = false;
+	TArray<int32> PendingSweep;
+	bool bPendingSweepHail = false;
+	float PendingSweepDelay = -1.0f;
+	bool bQuitAfterSweep = false;
 	int32 SweepIndex = INDEX_NONE;
 	bool bSweepMeasuring = false;
 	float SweepTimer = 0.0f;

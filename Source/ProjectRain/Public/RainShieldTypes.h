@@ -9,7 +9,7 @@ namespace RainShield
 	 *  protected shape and the placed blockers are merged into at most this many boxes. */
 	constexpr int32 MaxBoxes = 32;
 
-	/** Box kinds, the w of User.RainBox<i>Min. */
+	/** Box kinds (User.RainBox<i>Kind). */
 	constexpr float BoxNone = 0.0f;
 	constexpr float BoxBlocker = 1.0f;
 	constexpr float BoxProtected = 2.0f;
@@ -24,4 +24,10 @@ namespace RainShield
 
 	/** Rain drops in the game system by default (rain.game.Count). */
 	constexpr int32 DefaultRainCount = 200000;
+
+	/** System 2, hail: stone radii (cm), terminal speed (cm/s), stones by default (rain.game.HailCount). */
+	constexpr float HailRadiusMin = 1.0f;
+	constexpr float HailRadiusMax = 2.0f;
+	constexpr float HailSpeed = 900.0f;
+	constexpr int32 DefaultHailCount = 2000;
 }

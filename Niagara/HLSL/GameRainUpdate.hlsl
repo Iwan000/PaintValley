@@ -86,10 +86,10 @@ else
 	if (GrS > -0.5 * GrL)
 	{
 		float3 GrInv = 1.0 / (GrSeg + 1e-4 * (1.0 - abs(sign(GrSeg))));
-#define GR_BOX(Mn, Mx) if (Mn.w > 0.5) { float3 GrT1 = (Mn.xyz - GrP0) * GrInv; float3 GrT2 = (Mx - GrP0) * GrInv; \
+#define GR_BOX(Mn, Mx, K) if (K > 0.5) { float3 GrT1 = (Mn - GrP0) * GrInv; float3 GrT2 = (Mx - GrP0) * GrInv; \
 	float3 GrLo = min(GrT1, GrT2); float3 GrHi = max(GrT1, GrT2); \
 	float GrIn = max(max(GrLo.x, GrLo.y), GrLo.z); float GrOut = min(min(GrHi.x, GrHi.y), GrHi.z); \
-	if (GrOut >= max(GrIn, 0.0) && GrIn <= 1.0 && GrIn < GrHitT) { GrHitT = max(GrIn, 0.0); GrHitType = Mn.w; } }
+	if (GrOut >= max(GrIn, 0.0) && GrIn <= 1.0 && GrIn < GrHitT) { GrHitT = max(GrIn, 0.0); GrHitType = K; } }
 $(GAME_BOX_TESTS)
 #undef GR_BOX
 	}

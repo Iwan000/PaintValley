@@ -27,6 +27,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildRainGameAssets(int32 RainCount = 200000);
 
+	/** Builds the Rain Shield hail (System 2: few complex particles, meshes): NS_RainHail (CPU) and NS_RainHailGPU
+	 *  (the same HLSL on the GPU: the measured CPU -> GPU port), plus M_Hail. HailCount stones by default
+	 *  (User.RainGameCount, changed at runtime by rain.game.HailCount). */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString BuildRainHailAssets(int32 HailCount = 2000);
+
 	/** Builds M_RainBasic (parameter material for stage props), M_WetGround (puddles + ripples) and
 	 *  M_NightSky (the night backdrop; needs Scripts/import_backdrop.py first). */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")

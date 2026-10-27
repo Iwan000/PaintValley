@@ -26,6 +26,9 @@
 #include "NiagaraNodeFunctionCall.h"
 #include "NiagaraScript.h"
 #include "NiagaraSpriteRendererProperties.h"
+#include "NiagaraMeshRendererProperties.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/MaterialExpressionMultiply.h"
 #include "NiagaraSystem.h"
 #include "NiagaraActor.h"
 #include "NiagaraDataInterfaceExport.h"
@@ -793,6 +796,12 @@ namespace
 		float GustWavelength = 260.0f;
 		float FaceFade = 40.0f;
 		int32 Seed = 71;
+		float HailRestitution = 0.45f;
+		float HailFriction = 0.15f;
+		float HailRestSpeed = 40.0f;
+		float HailEventSpeed = 150.0f;
+		float HailMeltDelay = 2.0f;
+		float HailMeltRate = 0.5f;
 	};
 
 	FString FillGame(FString Text, const FGameRainConfig& C)
@@ -806,9 +815,21 @@ namespace
 		FString Boxes;
 		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
 		{
-			Boxes += FString::Printf(TEXT("\t\tGR_BOX(User.RainBox%dMin, User.RainBox%dMax)\n"), i, i);
+			Boxes += FString::Printf(TEXT("\t\tGR_BOX(User.RainBox%dMin, User.RainBox%dMax, User.RainBox%dKind)\n"), i, i, i);
 		}
 		Text.ReplaceInline(TEXT("$(GAME_BOX_TESTS)"), *Boxes);
+		Text.ReplaceInline(TEXT("$(GAME_BOX_TESTS_HAIL)"), *Boxes.Replace(TEXT("GR_BOX"), TEXT("HB_BOX")));
+		// System 2 (hail): CPU-friendly (float seed), RainShieldTypes.h sizes and speed, bounce and melt.
+		Text.ReplaceInline(TEXT("$(SEED_F)"), *F(float(C.Seed) * 0.6180339f));
+		Text.ReplaceInline(TEXT("$(HAIL_R_MIN)"), *F(RainShield::HailRadiusMin));
+		Text.ReplaceInline(TEXT("$(HAIL_R_MAX)"), *F(RainShield::HailRadiusMax));
+		Text.ReplaceInline(TEXT("$(HAIL_SPEED)"), *F(RainShield::HailSpeed));
+		Text.ReplaceInline(TEXT("$(HAIL_RESTITUTION)"), *F(C.HailRestitution));
+		Text.ReplaceInline(TEXT("$(HAIL_FRICTION)"), *F(C.HailFriction));
+		Text.ReplaceInline(TEXT("$(HAIL_REST_SPEED)"), *F(C.HailRestSpeed));
+		Text.ReplaceInline(TEXT("$(HAIL_EVENT_SPEED)"), *F(C.HailEventSpeed));
+		Text.ReplaceInline(TEXT("$(HAIL_MELT_DELAY)"), *F(C.HailMeltDelay));
+		Text.ReplaceInline(TEXT("$(HAIL_MELT_RATE)"), *F(C.HailMeltRate));
 		return Text;
 	}
 
@@ -831,12 +852,12 @@ namespace
 		Float(TEXT("RainGameActive"), 0.0f);
 		Float(TEXT("RainGameScoring"), 0.0f);
 		Float(TEXT("RainGameGust"), 60.0f);
+		// Boxes as Vec3 + float, no Vec4: on the CPU (VectorVM) every user parameter after a Vec4 read back shifted.
 		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
 		{
-			FNiagaraVariable Min(FNiagaraTypeDefinition::GetVec4Def(), *FString::Printf(TEXT("RainBox%dMin"), i));
-			Min.SetValue(FVector4f(1e9f, 1e9f, 1e9f, RainShield::BoxNone));
-			Add(Min);
-			Vec3(*FString::Printf(TEXT("RainBox%dMax"), i), FVector3f(-1e9f));
+			Vec3(*FString::Printf(TEXT("RainBox%dMin"), i), FVector3f(1e6f));
+			Vec3(*FString::Printf(TEXT("RainBox%dMax"), i), FVector3f(-1e6f));
+			Float(*FString::Printf(TEXT("RainBox%dKind"), i), RainShield::BoxNone);
 		}
 
 		// Hits go back to gameplay through Export Particle Data: the DI calls the object in User.RainHitHandler
@@ -852,6 +873,99 @@ namespace
 		System->GetExposedParameters().SetDataInterface(Export, ExportVar);
 	}
 
+
+	// The stock Export Particle Data module's inputs, found by type (their names are the engine's, not ours).
+	struct FGameExportInputs
+	{
+		UNiagaraScript* Module = nullptr;
+		FName Export, Store, Position, Size, Velocity, Delay;
+		FNiagaraTypeDefinition PositionType = FNiagaraTypeDefinition::GetVec3Def();
+		FNiagaraTypeDefinition VelocityType = FNiagaraTypeDefinition::GetVec3Def();
+	};
+
+	FGameExportInputs FindExportInputs(FString& Report)
+	{
+		FGameExportInputs In;
+		In.Module = LoadObject<UNiagaraScript>(nullptr, ExportModulePath);
+		UNiagaraScriptSource* Source = In.Module ? Cast<UNiagaraScriptSource>(In.Module->GetLatestSource()) : nullptr;
+		if (!Source || !Source->NodeGraph)
+		{
+			Report += FString::Printf(TEXT("  MISSING export module %s\n"), ExportModulePath);
+			In.Module = nullptr;
+			return In;
+		}
+		for (const auto& Pair : Source->NodeGraph->GetAllMetaData())
+		{
+			const FString Name = Pair.Key.GetName().ToString();
+			if (!Name.StartsWith(TEXT("Module.")))
+			{
+				continue;
+			}
+			const FNiagaraTypeDefinition& Type = Pair.Key.GetType();
+			const FName Input(*Name.RightChop(7));
+			if (Type.GetClass() && Type.GetClass()->IsChildOf(UNiagaraDataInterfaceExport::StaticClass()))
+			{
+				In.Export = Input;
+			}
+			else if (Type == FNiagaraTypeDefinition::GetBoolDef())
+			{
+				In.Store = Input;
+			}
+			else if (Name.Contains(TEXT("Position")))
+			{
+				In.Position = Input;
+				In.PositionType = Type;
+			}
+			else if (Name.Contains(TEXT("Velocity")))
+			{
+				In.Velocity = Input;
+				In.VelocityType = Type;
+			}
+			else if (Name.Contains(TEXT("Size")))
+			{
+				In.Size = Input;
+			}
+			else if (Name.Contains(TEXT("Delay")))
+			{
+				In.Delay = Input;
+			}
+		}
+		return In;
+	}
+
+	// Adds Export Particle Data after the update: exports the particles that raise Particles.RainGameHit this frame
+	// (position Particles.RainGameHitPos, size and velocity from the given attributes) to User.RainGameExport.
+	bool AddExportModule(UNiagaraEmitter* Emitter, FVersionedNiagaraEmitterData& D, const FGameExportInputs& In,
+		const FNiagaraVariableBase& SizeAttribute, const FNiagaraVariableBase* VelocityAttribute)
+	{
+		if (!In.Module)
+		{
+			return false;
+		}
+		UNiagaraNodeFunctionCall* Export = AddModule(D, ENiagaraScriptUsage::ParticleUpdateScript, In.Module);
+		const bool bLinked = !In.Export.IsNone() && !In.Store.IsNone()
+			&& LinkModuleInput(Export, In.Export, GameExportParam.GetType(), GameExportParam)
+			&& LinkModuleInput(Export, In.Store, FNiagaraTypeDefinition::GetBoolDef(), GameHitParam);
+		if (!In.Delay.IsNone())
+		{
+			// Its default (0.1 s between exports) would drop most hits: export every frame.
+			SetModuleInputFloat(Emitter, D, ENiagaraScriptUsage::ParticleUpdateScript, Export, In.Delay, 0.0f);
+		}
+		if (!In.Position.IsNone())
+		{
+			LinkModuleInput(Export, In.Position, In.PositionType, FNiagaraVariableBase(In.PositionType, TEXT("Particles.RainGameHitPos")));
+		}
+		if (!In.Size.IsNone())
+		{
+			LinkModuleInput(Export, In.Size, FNiagaraTypeDefinition::GetFloatDef(), SizeAttribute);
+		}
+		if (VelocityAttribute && !In.Velocity.IsNone())
+		{
+			LinkModuleInput(Export, In.Velocity, In.VelocityType, *VelocityAttribute);
+		}
+		return bLinked;
+	}
+
 	UNiagaraEmitter* BuildGameRainEmitter(const FGameRainConfig& C, UMaterialInterface* Material, FString& Report)
 	{
 		const FString ModPath = RainRoot / TEXT("Niagara/Modules");
@@ -862,50 +976,7 @@ namespace
 		SaveAsset(Spawn);
 		SaveAsset(Update);
 
-		// The stock export module's inputs, found by type (their names are the engine's, not ours).
-		UNiagaraScript* ExportModule = LoadObject<UNiagaraScript>(nullptr, ExportModulePath);
-		FName ExportInput, StoreInput, PositionInput, SizeInput, DelayInput;
-		FNiagaraTypeDefinition PositionType = FNiagaraTypeDefinition::GetVec3Def();
-		UNiagaraScriptSource* ExportSource = ExportModule ? Cast<UNiagaraScriptSource>(ExportModule->GetLatestSource()) : nullptr;
-		if (ExportSource && ExportSource->NodeGraph)
-		{
-			for (const auto& Pair : ExportSource->NodeGraph->GetAllMetaData())
-			{
-				const FString Name = Pair.Key.GetName().ToString();
-				if (!Name.StartsWith(TEXT("Module.")))
-				{
-					continue;
-				}
-				const FNiagaraTypeDefinition& Type = Pair.Key.GetType();
-				const FName Input(*Name.RightChop(7));
-				Report += FString::Printf(TEXT("  export module input '%s' : %s\n"), *Input.ToString(), *Type.GetName());
-				if (Type.GetClass() && Type.GetClass()->IsChildOf(UNiagaraDataInterfaceExport::StaticClass()))
-				{
-					ExportInput = Input;
-				}
-				else if (Type == FNiagaraTypeDefinition::GetBoolDef())
-				{
-					StoreInput = Input;
-				}
-				else if (Name.Contains(TEXT("Position")))
-				{
-					PositionInput = Input;
-					PositionType = Type;
-				}
-				else if (Name.Contains(TEXT("Size")))
-				{
-					SizeInput = Input;
-				}
-				else if (Name.Contains(TEXT("Delay")))
-				{
-					DelayInput = Input;
-				}
-			}
-		}
-		else
-		{
-			Report += FString::Printf(TEXT("  MISSING export module %s\n"), ExportModulePath);
-		}
+		const FGameExportInputs Inputs = FindExportInputs(Report);
 
 		UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("GameRain"), false);
 		FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
@@ -923,7 +994,7 @@ namespace
 
 		TArray<FNiagaraVariable> Attributes = RainAttributes();
 		Attributes.Add(FNiagaraVariable(GameHitParam));
-		Attributes.Add(FNiagaraVariable(PositionType, TEXT("Particles.RainGameHitPos")));
+		Attributes.Add(FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")));
 		TArray<FString> Defaults;
 		Defaults.SetNum(Attributes.Num());
 		AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
@@ -931,27 +1002,7 @@ namespace
 		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
 
 		// After the update: exports the drops that hit the protected shape this frame.
-		bool bExportLinked = false;
-		if (ExportModule)
-		{
-			UNiagaraNodeFunctionCall* Export = AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, ExportModule);
-			bExportLinked = !ExportInput.IsNone() && !StoreInput.IsNone()
-				&& LinkModuleInput(Export, ExportInput, GameExportParam.GetType(), GameExportParam)
-				&& LinkModuleInput(Export, StoreInput, FNiagaraTypeDefinition::GetBoolDef(), GameHitParam);
-			if (!PositionInput.IsNone())
-			{
-				LinkModuleInput(Export, PositionInput, PositionType, FNiagaraVariableBase(PositionType, TEXT("Particles.RainGameHitPos")));
-			}
-			if (!DelayInput.IsNone())
-			{
-				// Its default (0.1 s between exports) would drop most hits: export every frame.
-				SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::ParticleUpdateScript, Export, DelayInput, 0.0f);
-			}
-			if (!SizeInput.IsNone())
-			{
-				LinkModuleInput(Export, SizeInput, FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Particles.RainDiameter")));
-			}
-		}
+		const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Particles.RainDiameter")), nullptr);
 
 		UNiagaraSpriteRendererProperties* Sprite = NewObject<UNiagaraSpriteRendererProperties>(Emitter, TEXT("DropSprites"));
 		Sprite->Material = Material;
@@ -986,5 +1037,119 @@ FString URainBuilderLibrary::BuildRainGameAssets(int32 RainCount)
 	FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
 	const bool bOk = CompileAndReport(System, Report);
 	SaveAsset(System);
+	return FString::Printf(TEXT("%s\n%s"), bOk ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
+}
+
+namespace
+{
+	// Hailstones: lit, a touch glossy and self-lit enough to read at night; colour per stone from the particle.
+	UMaterial* BuildHailMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_Hail"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Opaque;
+		M->SetShadingModel(MSM_DefaultLit);
+		M->bUsedWithNiagaraMeshParticles = true;
+		M->bUsedWithNiagaraSprites = true;
+		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -600, 0);
+		auto Scalar = [M](const TCHAR* Name, float Default, int32 Y)
+		{
+			UMaterialExpressionScalarParameter* P = AddExpr<UMaterialExpressionScalarParameter>(M, -400, Y);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		UMaterialExpressionMultiply* Glow = AddExpr<UMaterialExpressionMultiply>(M, -200, 300);
+		Glow->A.Connect(0, PColor);
+		Glow->B.Connect(0, Scalar(TEXT("Glow"), 0.03f, 400));
+		UMaterialEditingLibrary::ConnectMaterialProperty(PColor, TEXT("RGB"), MP_BaseColor);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Scalar(TEXT("Roughness"), 0.22f, 100), TEXT(""), MP_Roughness);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Scalar(TEXT("Specular"), 0.9f, 200), TEXT(""), MP_Specular);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Glow, TEXT(""), MP_EmissiveColor);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+
+	UNiagaraEmitter* BuildHailEmitter(const FGameRainConfig& C, bool bGpu, UMaterialInterface* Material, FString& Report)
+	{
+		// The same HLSL for both targets (the CPU -> GPU port is the measured optimisation).
+		const FString ModPath = RainRoot / TEXT("Niagara/Modules");
+		const TCHAR* Suffix = bGpu ? TEXT("GPU") : TEXT("");
+		UNiagaraScript* Spawn = CreateHlslModule(ModPath, FString(TEXT("NM_HailSpawn")) + Suffix,
+			FillGame(LoadTextFile(TEXT("Niagara/HLSL/HailSpawn.hlsl")), C), TEXT("Rain Shield hail: stones parked upwind"), ParticleModuleMask);
+		UNiagaraScript* Update = CreateHlslModule(ModPath, FString(TEXT("NM_HailUpdate")) + Suffix,
+			FillGame(LoadTextFile(TEXT("Niagara/HLSL/HailUpdate.hlsl")), C), TEXT("Rain Shield hail: fall, bounce, rest, melt, impacts"), ParticleModuleMask);
+		SaveAsset(Spawn);
+		SaveAsset(Update);
+		const FGameExportInputs Inputs = FindExportInputs(Report);
+
+		UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("Hail"), false);
+		FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+		D->SimTarget = bGpu ? ENiagaraSimTarget::GPUComputeSim : ENiagaraSimTarget::CPUSim;
+		D->bLocalSpace = false;
+		D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+		D->FixedBounds = FBox(FVector(-5000.0), FVector(5000.0));
+
+		UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+		SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+		UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+		const bool bCountLinked = LinkModuleInput(Burst, TEXT("Spawn Count"), FNiagaraTypeDefinition::GetIntDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetIntDef(), TEXT("User.RainGameCount")));
+		LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+
+		const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+		const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
+		TArray<FNiagaraVariable> Attributes = {
+			FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
+			FNiagaraVariable(V3, TEXT("Particles.Velocity")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
+			FNiagaraVariable(V3, TEXT("Particles.Scale")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetQuatDef(), TEXT("Particles.MeshOrientation")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetVec4Def(), TEXT("Particles.RainRand")),
+			FNiagaraVariable(F, TEXT("Particles.HailRadius")),
+			FNiagaraVariable(F, TEXT("Particles.HailState")),
+			FNiagaraVariable(F, TEXT("Particles.HailTimer")),
+			FNiagaraVariable(F, TEXT("Particles.HailCycle")),
+			FNiagaraVariable(F, TEXT("Particles.HailAngle")),
+			FNiagaraVariable(GameHitParam),
+			FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")),
+			FNiagaraVariable(Inputs.VelocityType, TEXT("Particles.HailImpact")),
+		};
+		TArray<FString> Defaults;
+		Defaults.SetNum(Attributes.Num());
+		AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
+		AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+		const FNiagaraVariableBase Impact(Inputs.VelocityType, TEXT("Particles.HailImpact"));
+		const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(F, TEXT("Particles.HailRadius")), &Impact);
+
+		UNiagaraMeshRendererProperties* Meshes = NewObject<UNiagaraMeshRendererProperties>(Emitter, TEXT("HailMeshes"));
+		Meshes->Meshes.SetNum(1);
+		Meshes->Meshes[0].Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+		Meshes->bOverrideMaterials = true;
+		FNiagaraMeshMaterialOverride& Override = Meshes->OverrideMaterials.AddDefaulted_GetRef();
+		Override.ExplicitMat = Material;
+		Emitter->AddRenderer(Meshes, D->Version.VersionGuid);
+
+		Report += FString::Printf(TEXT("Emitter Hail (%s): User.RainGameCount stones (%s), mesh renderer, impact export %s\n"),
+			bGpu ? TEXT("GPU") : TEXT("CPU"), bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
+		return Emitter;
+	}
+}
+
+FString URainBuilderLibrary::BuildRainHailAssets(int32 HailCount)
+{
+	FString Report;
+	UMaterial* HailMaterial = BuildHailMaterial(Report);
+	bool bOk = true;
+	for (const bool bGpu : { false, true })
+	{
+		UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), bGpu ? TEXT("NS_RainHailGPU") : TEXT("NS_RainHail"));
+		AddGameUserParameters(System, HailCount);
+		FGameRainConfig Config;
+		UNiagaraEmitter* Emitter = BuildHailEmitter(Config, bGpu, HailMaterial, Report);
+		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
+		bOk &= CompileAndReport(System, Report);
+		SaveAsset(System);
+	}
 	return FString::Printf(TEXT("%s\n%s"), bOk ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
 }

@@ -9,7 +9,6 @@
 #include "Components/PointLightComponent.h"
 #include "Engine/PointLight.h"
 #include "DrawDebugHelpers.h"
-#include "DynamicRHI.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -24,12 +23,15 @@
 #include "Misc/Paths.h"
 #include "NiagaraActor.h"
 #include "NiagaraComponent.h"
+#include "NiagaraDataSetAccessor.h"
 #include "NiagaraEmitterInstance.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemInstance.h"
 #include "NiagaraSystemInstanceController.h"
 #include "Particles/ParticlePerfStatsManager.h"
-#include "RenderTimer.h"
+#include "Engine/GameViewportClient.h"
+#include "Misc/CommandLine.h"
+#include "UnrealClient.h"
 #include "UObject/ConstructorHelpers.h"
 
 // ---------------------------------------------------------------------------------------------- console
@@ -41,18 +43,41 @@ static TAutoConsoleVariable<int32> CVarRainGameCount(
 	TEXT("Rain Shield: drops in the game's rain (System 1, GPU sprites). Changing it reinitialises the rain system."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRainGameHailCount(
+	TEXT("rain.game.HailCount"),
+	RainShield::DefaultHailCount,
+	TEXT("Rain Shield: hailstones (System 2, meshes). Changing it reinitialises the hail system."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRainGameMode(
+	TEXT("rain.game.Mode"),
+	0,
+	TEXT("Rain Shield: 0 rain (System 1, GPU sprites), 1 hail (System 2, meshes). Switches while planning (key G)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRainGameHailGPU(
+	TEXT("rain.game.HailGPU"),
+	0,
+	TEXT("Rain Shield: 0 simulates the hail on the CPU (NS_RainHail), 1 on the GPU (NS_RainHailGPU, the same HLSL): the CPU -> GPU port."),
+	ECVF_Default);
+
 static FAutoConsoleCommandWithWorldAndArgs GRainGameSweep(
 	TEXT("rain.game.Sweep"),
-	TEXT("Rain Shield: steps the rain through particle counts and writes frame / game thread / render thread / GPU / Niagara times to Saved/Sweeps/*.csv.\n")
-	TEXT("Args: counts (default 0 50000 100000 200000 400000 800000 1600000), optional settle=<s> measure=<s>."),
+	TEXT("Rain Shield: steps the rain (or, with 'hail', the hail) through particle counts and writes frame / game thread / render thread / GPU / Niagara times to Saved/Sweeps/*.csv.\n")
+	TEXT("Args: [hail] counts (default rain 0 50000 100000 200000 400000 800000 1600000, hail 0 500 1000 2000 5000 10000 20000 40000), optional settle=<s> measure=<s>."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		TArray<int32> Counts;
+		bool bHail = false;
 		float Settle = 3.0f;
 		float Measure = 5.0f;
 		for (const FString& Arg : Args)
 		{
-			if (Arg.StartsWith(TEXT("settle=")))
+			if (Arg == TEXT("hail"))
+			{
+				bHail = true;
+			}
+			else if (Arg.StartsWith(TEXT("settle=")))
 			{
 				Settle = FCString::Atof(*Arg.RightChop(7));
 			}
@@ -67,11 +92,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRainGameSweep(
 		}
 		if (Counts.Num() == 0)
 		{
-			Counts = { 0, 50000, 100000, 200000, 400000, 800000, 1600000 };
+			Counts = bHail ? TArray<int32>{ 0, 500, 1000, 2000, 5000, 10000, 20000, 40000 } : TArray<int32>{ 0, 50000, 100000, 200000, 400000, 800000, 1600000 };
 		}
 		for (TActorIterator<ARainShieldGame> It(World); It; ++It)
 		{
-			It->StartSweep(Counts, Settle, Measure);
+			It->StartSweep(Counts, bHail, Settle, Measure);
 			return;
 		}
 		UE_LOG(LogTemp, Warning, TEXT("rain.game.Sweep: no RainShieldGame in this world (open L_RainShield)"));
@@ -252,6 +277,9 @@ ARainShieldGame::ARainShieldGame()
 	Rain = CreateDefaultSubobject<UNiagaraComponent>(TEXT("Rain"));
 	Rain->SetupAttachment(RootComponent);
 	Rain->bAutoActivate = false;
+	Hail = CreateDefaultSubobject<UNiagaraComponent>(TEXT("Hail"));
+	Hail->SetupAttachment(RootComponent);
+	Hail->bAutoActivate = false;
 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasicMaterial(TEXT("/Game/RainMagic/Materials/M_RainBasic.M_RainBasic"));
@@ -266,6 +294,8 @@ ARainShieldGame::ARainShieldGame()
 		(*Cubes)->LightingChannels.bChannel1 = true;
 	}
 	RainSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_RainGame.NS_RainGame")));
+	HailSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_RainHail.NS_RainHail")));
+	HailSystemGPU = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_RainHailGPU.NS_RainHailGPU")));
 	Levels = DefaultLevels();
 
 	// The 26 directions: the 6 axes first (falling down first), then the 12 edge and 8 corner diagonals.
@@ -373,22 +403,56 @@ void ARainShieldGame::BeginPlay()
 	MeanFallSpeed = float(Sum / Samples);
 
 	RainCount = FMath::Max(CVarRainGameCount.GetValueOnGameThread(), 0);
-	if (UNiagaraSystem* System = RainSystem.LoadSynchronous())
+	if (FParse::Param(FCommandLine::Get(), TEXT("RainHailGPU")))
 	{
-		Rain->SetAsset(System);
-		Rain->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
-		Rain->SetVariableObject(TEXT("RainHitHandler"), this);
-		Rain->SetVariableInt(TEXT("RainGameCount"), RainCount);
-		// A 180-degree shutter at 60 fps: short streaks.
-		Rain->SetVariableFloat(TEXT("RainShutter"), 0.5f / 60.0f);
-		Rain->SetVariableFloat(TEXT("RainGameGust"), Gust);
-		Rain->Activate(true);
+		CVarRainGameHailGPU->Set(1);
 	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("RainShieldGame: %s missing (run unreal.RainBuilderLibrary.build_rain_game_assets())"), *RainSystem.ToString());
-	}
+	HailCount = FMath::Max(CVarRainGameHailCount.GetValueOnGameThread(), 0);
+	bHailMode = CVarRainGameMode.GetValueOnGameThread() == 1;
+	bHailGpu = CVarRainGameHailGPU.GetValueOnGameThread() == 1;
+	SetupSystem(Rain, RainSystem.LoadSynchronous(), RainCount);
+	// A 180-degree shutter at 60 fps: short streaks.
+	Rain->SetVariableFloat(TEXT("RainShutter"), 0.5f / 60.0f);
+	SetupSystem(Hail, (bHailGpu ? HailSystemGPU : HailSystem).LoadSynchronous(), HailCount);
 	StartLevel(0);
+
+	// Reproducible sweeps from the command line (standalone 1080p runs, see README):
+	//   -RainSweep=0,50000,... (or -RainSweep=hail:0,500,...)  -RainSweepQuit
+	FString Sweep;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RainSweep="), Sweep, false))
+	{
+		bPendingSweepHail = Sweep.RemoveFromStart(TEXT("hail:"));
+		TArray<FString> Parts;
+		Sweep.ParseIntoArray(Parts, TEXT(","));
+		for (const FString& Part : Parts)
+		{
+			PendingSweep.Add(FCString::Atoi(*Part));
+		}
+		bQuitAfterSweep = FParse::Param(FCommandLine::Get(), TEXT("RainSweepQuit"));
+		PendingSweepDelay = 4.0f;
+	}
+}
+
+void ARainShieldGame::SetupSystem(UNiagaraComponent* Component, UNiagaraSystem* System, int32 Count)
+{
+	if (!System)
+	{
+		UE_LOG(LogTemp, Error, TEXT("RainShieldGame: Niagara system missing for %s (run build_rain_game_assets / build_rain_hail_assets)"), *Component->GetName());
+		return;
+	}
+	Component->SetAsset(System);
+	Component->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
+	Component->SetVariableObject(TEXT("RainHitHandler"), this);
+	Component->SetVariableInt(TEXT("RainGameCount"), Count);
+	Component->SetVariableFloat(TEXT("RainGameGust"), Gust);
+	Component->Activate(true);
+}
+
+void ARainShieldGame::ApplyHailAsset()
+{
+	SetupSystem(Hail, (bHailGpu ? HailSystemGPU : HailSystem).LoadSynchronous(), HailCount);
+	UploadBoxes(Phase != ERainShieldPhase::Plan);
+	UploadRain();
 }
 
 void ARainShieldGame::EndPlay(const EEndPlayReason::Type Reason)
@@ -508,22 +572,31 @@ void ARainShieldGame::UploadBoxes(bool bWithBlockers)
 	for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
 	{
 		const bool bUsed = Boxes.IsValidIndex(i);
-		const FVector Lo = bUsed ? Boxes[i].Key.Min : FVector(1e9);
-		const FVector Hi = bUsed ? Boxes[i].Key.Max : FVector(-1e9);
-		Rain->SetVariableVec4(*FString::Printf(TEXT("RainBox%dMin"), i), FVector4(Lo.X, Lo.Y, Lo.Z, bUsed ? Boxes[i].Value : RainShield::BoxNone));
-		Rain->SetVariableVec3(*FString::Printf(TEXT("RainBox%dMax"), i), Hi);
+		const FVector Lo = bUsed ? Boxes[i].Key.Min : FVector(1e6);
+		const FVector Hi = bUsed ? Boxes[i].Key.Max : FVector(-1e6);
+		for (UNiagaraComponent* System : { Rain.Get(), Hail.Get() })
+		{
+			System->SetVariableVec3(*FString::Printf(TEXT("RainBox%dMin"), i), Lo);
+			System->SetVariableVec3(*FString::Printf(TEXT("RainBox%dMax"), i), Hi);
+			System->SetVariableFloat(*FString::Printf(TEXT("RainBox%dKind"), i), bUsed ? Boxes[i].Value : RainShield::BoxNone);
+		}
 	}
 }
 
 void ARainShieldGame::UploadRain()
 {
-	Rain->SetVariableVec3(TEXT("RainGameDir"), Direction());
-	Rain->SetVariableVec3(TEXT("RainGameCenter"), GridCenter());
-	Rain->SetVariableFloat(TEXT("RainGameHalf"), StreamHalf());
-	Rain->SetVariableFloat(TEXT("RainGameLength"), StreamLength());
-	Rain->SetVariableFloat(TEXT("RainGameActive"), Phase == ERainShieldPhase::Plan ? 0.0f : 1.0f);
-	Rain->SetVariableFloat(TEXT("RainGameScoring"), Phase == ERainShieldPhase::Raining ? 1.0f : 0.0f);
-	Rain->SetVariableFloat(TEXT("RainGameGust"), Gust);
+	// Both systems share the stream; only the selected one falls.
+	for (UNiagaraComponent* System : { Rain.Get(), Hail.Get() })
+	{
+		const bool bSelected = System == ActiveSystem();
+		System->SetVariableVec3(TEXT("RainGameDir"), Direction());
+		System->SetVariableVec3(TEXT("RainGameCenter"), GridCenter());
+		System->SetVariableFloat(TEXT("RainGameHalf"), StreamHalf());
+		System->SetVariableFloat(TEXT("RainGameLength"), StreamLength());
+		System->SetVariableFloat(TEXT("RainGameActive"), bSelected && Phase != ERainShieldPhase::Plan ? 1.0f : 0.0f);
+		System->SetVariableFloat(TEXT("RainGameScoring"), bSelected && Phase == ERainShieldPhase::Raining ? 1.0f : 0.0f);
+		System->SetVariableFloat(TEXT("RainGameGust"), Gust);
+	}
 }
 
 void ARainShieldGame::RefreshCubes()
@@ -561,6 +634,8 @@ void ARainShieldGame::StartLevel(int32 Index)
 	RoundClock = 0.0f;
 	Hits = 0;
 	HitWaterMl = 0.0;
+	BrokenBlockers = 0;
+	BlockerImpacts = 0;
 	RecentHits.Reset();
 
 	// The reference outline: the shape's largest shadow along a grid axis (cells x cell area).
@@ -631,7 +706,7 @@ bool ARainShieldGame::PlacePiece()
 	{
 		return false;
 	}
-	Placed.Add({ CurrentPiece, Cells });
+	Placed.Add({ CurrentPiece, Cells, 0, 0 });
 	RefreshCubes();
 	if (Placed.Num() < Levels[LevelIndex].Pieces.Num())
 	{
@@ -675,6 +750,11 @@ void ARainShieldGame::StartRound()
 	HitWaterMl = 0.0;
 	MaxHitsPerCallback = 0;
 	SaturatedCallbacks = 0;
+	BlockerImpacts = 0;
+	for (FPlaced& P : Placed)
+	{
+		P.HitPoints = P.MaxHitPoints = PieceHitPoints(P.Cells.Num());
+	}
 	UploadBoxes(true);
 	UploadRain();
 }
@@ -692,9 +772,19 @@ float ARainShieldGame::ExpectedHits(float Seconds) const
 	// outline catches. The first drops need (L/2 - grid/2) / v to reach the grid.
 	const float H = StreamHalf();
 	const float L = StreamLength();
-	const float Density = RainCount / (4.0f * H * H * L);
-	const float Arrive = (0.5f * L - 0.5f * GridSize * CellSize) / FMath::Max(MeanFallSpeed, 1.0f);
-	return Density * MeanFallSpeed * ReferenceArea * FMath::Max(Seconds - Arrive, 0.0f);
+	const float Density = (bHailMode ? HailCount : RainCount) / (4.0f * H * H * L);
+	const float Speed = bHailMode ? RainShield::HailSpeed : MeanFallSpeed;
+	const float Arrive = (0.5f * L - 0.5f * GridSize * CellSize) / FMath::Max(Speed, 1.0f);
+	return Density * Speed * ReferenceArea * FMath::Max(Seconds - Arrive, 0.0f);
+}
+
+int32 ARainShieldGame::PieceHitPoints(int32 Cells) const
+{
+	// The hail's impacts on one exposed cell in BlockerLifeSeconds: stones per cm^3 x speed x cell area x time.
+	const float H = StreamHalf();
+	const float L = StreamLength();
+	const float PerCell = HailCount / (4.0f * H * H * L) * RainShield::HailSpeed * CellSize * CellSize * BlockerLifeSeconds;
+	return FMath::Max(FMath::RoundToInt(Cells * PerCell), 1);
 }
 
 float ARainShieldGame::GetWetness() const
@@ -711,8 +801,13 @@ int32 ARainShieldGame::GetStars() const
 
 int32 ARainShieldGame::GetLiveParticleCount() const
 {
+	return LiveCount(ActiveSystem());
+}
+
+int32 ARainShieldGame::LiveCount(const UNiagaraComponent* Component)
+{
 	int32 Count = 0;
-	if (FNiagaraSystemInstanceControllerConstPtr SIC = Rain ? Rain->GetSystemInstanceController() : nullptr)
+	if (FNiagaraSystemInstanceControllerConstPtr SIC = Component ? Component->GetSystemInstanceController() : nullptr)
 	{
 		if (const FNiagaraSystemInstance* Instance = SIC->GetSystemInstance_Unsafe())
 		{
@@ -723,6 +818,25 @@ int32 ARainShieldGame::GetLiveParticleCount() const
 		}
 	}
 	return Count;
+}
+
+void ARainShieldGame::SetHailMode(bool bHail)
+{
+	if (Phase != ERainShieldPhase::Plan && SweepIndex == INDEX_NONE)
+	{
+		return;
+	}
+	bHailMode = bHail;
+	UploadRain();
+}
+
+void ARainShieldGame::SetHailCount(int32 Count)
+{
+	HailCount = FMath::Max(Count, 0);
+	Hail->SetVariableInt(TEXT("RainGameCount"), HailCount);
+	Hail->ReinitializeSystem();
+	UploadBoxes(Phase != ERainShieldPhase::Plan);
+	UploadRain();
 }
 
 void ARainShieldGame::SetRainCount(int32 Count)
@@ -737,6 +851,11 @@ void ARainShieldGame::SetRainCount(int32 Count)
 
 void ARainShieldGame::ReceiveParticleData_Implementation(const TArray<FBasicParticleData>& Data, UNiagaraSystem* NiagaraSystem, const FVector& SimulationPositionOffset)
 {
+	if (Hail && NiagaraSystem == Hail->GetAsset())
+	{
+		OnHailImpacts(Data, SimulationPositionOffset);
+		return;
+	}
 	Hits += Data.Num();
 	MaxHitsPerCallback = FMath::Max(MaxHitsPerCallback, Data.Num());
 	if (Data.Num() >= RainShield::ExportCapacity)
@@ -756,6 +875,58 @@ void ARainShieldGame::ReceiveParticleData_Implementation(const TArray<FBasicPart
 	}
 }
 
+void ARainShieldGame::OnHailImpacts(const TArray<FBasicParticleData>& Data, const FVector& Offset)
+{
+	// Velocity carries (box kind, impact speed cm/s, mass g); Size the stone's radius (HailUpdate.hlsl).
+	MaxHitsPerCallback = FMath::Max(MaxHitsPerCallback, Data.Num());
+	const float Now = GetWorld()->GetTimeSeconds();
+	bool bBroke = false;
+	for (const FBasicParticleData& P : Data)
+	{
+		const FVector At = P.Position + Offset;
+		if (P.Velocity.X > 1.5f)
+		{
+			// The shape: a hit, like a drop (meltwater of the stone's mass, in ml).
+			++Hits;
+			HitWaterMl += P.Velocity.Z;
+			if (RecentHits.Num() < 400)
+			{
+				RecentHits.Add({ At, Now });
+			}
+			continue;
+		}
+		// A blocker: the piece whose cell is nearest the impact loses a hit point; at zero it breaks.
+		++BlockerImpacts;
+		int32 Best = INDEX_NONE;
+		double BestDist = UE_BIG_NUMBER;
+		for (int32 i = 0; i < Placed.Num(); ++i)
+		{
+			for (const FIntVector& C : Placed[i].Cells)
+			{
+				const double Dist = FVector::DistSquared(CellCenter(C), At);
+				if (Dist < BestDist)
+				{
+					BestDist = Dist;
+					Best = i;
+				}
+			}
+		}
+		if (Best != INDEX_NONE && --Placed[Best].HitPoints <= 0)
+		{
+			Flash = FString::Printf(TEXT("%s broke!"), *Levels[LevelIndex].Pieces[Placed[Best].Piece].Name);
+			FlashTime = 2.5f;
+			Placed.RemoveAt(Best);
+			++BrokenBlockers;
+			bBroke = true;
+		}
+	}
+	if (bBroke)
+	{
+		RefreshCubes();
+		UploadBoxes(true);
+	}
+}
+
 // ---------------------------------------------------------------------------------------------- tick
 
 void ARainShieldGame::Tick(float DeltaSeconds)
@@ -770,11 +941,41 @@ void ARainShieldGame::Tick(float DeltaSeconds)
 		bViewSet = true;
 	}
 
-	const int32 WantedCount = FMath::Max(CVarRainGameCount.GetValueOnGameThread(), 0);
-	if (SweepIndex == INDEX_NONE && WantedCount != RainCount)
+	if (SweepIndex == INDEX_NONE)
 	{
-		SetRainCount(WantedCount);
+		const int32 WantedRain = FMath::Max(CVarRainGameCount.GetValueOnGameThread(), 0);
+		if (WantedRain != RainCount)
+		{
+			SetRainCount(WantedRain);
+		}
+		const int32 WantedHail = FMath::Max(CVarRainGameHailCount.GetValueOnGameThread(), 0);
+		if (WantedHail != HailCount)
+		{
+			SetHailCount(WantedHail);
+		}
+		const bool bWantGpu = CVarRainGameHailGPU.GetValueOnGameThread() == 1;
+		if (bWantGpu != bHailGpu)
+		{
+			bHailGpu = bWantGpu;
+			ApplyHailAsset();
+		}
+		const bool bWantHail = CVarRainGameMode.GetValueOnGameThread() == 1;
+		static bool bLastWantHail = false;
+		if (bWantHail != bLastWantHail)
+		{
+			bLastWantHail = bWantHail;
+			SetHailMode(bWantHail);
+		}
 	}
+	if (PendingSweepDelay > 0.0f)
+	{
+		PendingSweepDelay -= float(FApp::GetDeltaTime());
+		if (PendingSweepDelay <= 0.0f)
+		{
+			StartSweep(PendingSweep, bPendingSweepHail);
+		}
+	}
+	FlashTime -= DeltaSeconds;
 
 	HandleInput(DeltaSeconds);
 	UpdateCamera();
@@ -866,6 +1067,7 @@ void ARainShieldGame::HandleInput(float DeltaSeconds)
 		}
 		if (Pressed(EKeys::X)) SetDirection(DirectionIndex + 1);
 		if (Pressed(EKeys::Z)) SetDirection(DirectionIndex - 1);
+		if (Pressed(EKeys::G)) SetHailMode(!bHailMode);
 		if (Pressed(EKeys::Enter)) StartRound();
 	}
 	else if (Phase == ERainShieldPhase::Result)
@@ -953,13 +1155,15 @@ void ARainShieldGame::ShowHud() const
 	{
 		return;
 	}
+	// On-screen messages stack upwards: the last one added is the top line.
 	const FRainShieldLevel& Level = Levels[LevelIndex];
 	const uint64 Key = 0x5348494530ull;
 	const FVector2D Big(1.4f, 1.4f);
-	static const TCHAR* PhaseNames[] = { TEXT("PLAN"), TEXT("RAIN"), TEXT("RESULT") };
-	GEngine->AddOnScreenDebugMessage(Key + 0, 0.0f, FColor(230, 235, 255),
-		FString::Printf(TEXT("RAIN SHIELD   level %d/%d: %s   [%s]"), LevelIndex + 1, Levels.Num(), *Level.Name, PhaseNames[int32(Phase)]), false, Big);
-
+	TArray<TPair<FColor, FString>> Lines;
+	auto Line = [&Lines](const FColor& Color, const FString& Text) { Lines.Add({ Color, Text }); };
+	static const TCHAR* PhaseNames[] = { TEXT("PLAN"), TEXT("FALLING"), TEXT("RESULT") };
+	const TCHAR* Weather = bHailMode ? TEXT("HAIL") : TEXT("RAIN");
+	Line(FColor(230, 235, 255), FString::Printf(TEXT("RAIN SHIELD   level %d/%d: %s   [%s]   weather: %s"), LevelIndex + 1, Levels.Num(), *Level.Name, PhaseNames[int32(Phase)], Weather));
 	auto StarText = [](int32 Stars) { return FString::ChrN(Stars, TEXT('*')) + FString::ChrN(3 - Stars, TEXT('-')); };
 	if (Phase == ERainShieldPhase::Plan)
 	{
@@ -970,30 +1174,52 @@ void ARainShieldGame::ShowHud() const
 			const FString& Name = Level.Pieces[i].Name;
 			Pieces += i == CurrentPiece && PieceCells.Num() > 0 ? TEXT("[") + Name + TEXT("]  ") : (bPlaced ? TEXT("(") + Name + TEXT(" placed)  ") : Name + TEXT("  "));
 		}
-		GEngine->AddOnScreenDebugMessage(Key + 1, 0.0f, FColor(200, 220, 255), FString::Printf(TEXT("Pieces: %s"), *Pieces), false, Big);
-		GEngine->AddOnScreenDebugMessage(Key + 2, 0.0f, FColor(80, 200, 255), FString::Printf(TEXT("Rain falls: %s   (locked when the rain starts)"), *DirectionName(DirectionIndex)), false, Big);
-		GEngine->AddOnScreenDebugMessage(Key + 3, 0.0f, FColor(150, 160, 180),
-			TEXT("WASD/QE move   R/T rotate   Tab next piece   Space place   Backspace undo   1-6, Z/X rain direction   Enter: start the rain   RMB/arrows orbit   wheel zoom   PgUp/PgDn level"));
+		Line(FColor(200, 220, 255), FString::Printf(TEXT("Pieces: %s"), *Pieces));
+		Line(FColor(80, 200, 255), FString::Printf(TEXT("%s falls: %s   (locked when it starts)"), Weather, *DirectionName(DirectionIndex)));
+		Line(FColor(150, 160, 180), TEXT("WASD/QE move   R/T rotate   Tab next piece   Space place   Backspace undo   1-6, Z/X direction   G rain/hail   Enter: start   RMB/arrows orbit   wheel zoom   PgUp/PgDn level"));
 	}
 	else
 	{
 		const FColor C = Phase == ERainShieldPhase::Result ? FColor(255, 220, 120) : FColor(200, 220, 255);
-		GEngine->AddOnScreenDebugMessage(Key + 1, 0.0f, C, FString::Printf(TEXT("Time %.1f / %.0f s   hits %d (%.1f ml)   wetness %.1f%%   %s"),
-			RoundClock, Level.Duration, Hits, HitWaterMl, 100.0f * GetWetness(), *StarText(GetStars())), false, Big);
-		GEngine->AddOnScreenDebugMessage(Key + 2, 0.0f, FColor(80, 200, 255), FString::Printf(TEXT("Rain falls: %s   stars at wetness <= %.0f%% / %.0f%% / %.0f%%"),
-			*DirectionName(DirectionIndex), 100.0f * StarWetness.X, 100.0f * StarWetness.Y, 100.0f * StarWetness.Z), false, Big);
-		GEngine->AddOnScreenDebugMessage(Key + 3, 0.0f, FColor(150, 160, 180), Phase == ERainShieldPhase::Result
+		Line(C, FString::Printf(TEXT("Time %.1f / %.0f s   hits %d (%.1f ml)   wetness %.1f%%   %s"),
+			RoundClock, Level.Duration, Hits, HitWaterMl, 100.0f * GetWetness(), *StarText(GetStars())));
+		FString Extra;
+		if (bHailMode)
+		{
+			Extra = FString::Printf(TEXT("   blocker impacts %d, broken %d"), BlockerImpacts, BrokenBlockers);
+			for (const FPlaced& P : Placed)
+			{
+				Extra += FString::Printf(TEXT("   %s %.0f%%"), *Level.Pieces[P.Piece].Name, 100.0f * P.HitPoints / FMath::Max(P.MaxHitPoints, 1));
+			}
+		}
+		Line(FColor(80, 200, 255), FString::Printf(TEXT("%s falls: %s   stars at wetness <= %.0f%% / %.0f%% / %.0f%%%s"),
+			Weather, *DirectionName(DirectionIndex), 100.0f * StarWetness.X, 100.0f * StarWetness.Y, 100.0f * StarWetness.Z, *Extra));
+		Line(FColor(150, 160, 180), Phase == ERainShieldPhase::Result
 			? (GetStars() > 0 ? TEXT("Enter: next level   R: re-plan") : TEXT("Too wet. Enter: try again   R: re-plan")) : TEXT("RMB/arrows orbit   wheel zoom"));
 	}
-	GEngine->AddOnScreenDebugMessage(Key + 4, 0.0f, FColor(120, 200, 140), FString::Printf(
-		TEXT("System 1 GPU sprites: %d requested (rain.game.Count), %d live   boxes %d/%d   hit readback: max %d/frame of %d%s"),
-		RainCount, GetLiveParticleCount(), BoxesUsed, RainShield::MaxBoxes, MaxHitsPerCallback, RainShield::ExportCapacity,
-		SaturatedCallbacks > 0 ? *FString::Printf(TEXT("   SATURATED %d frames"), SaturatedCallbacks) : TEXT("")));
+	if (FlashTime > 0.0f)
+	{
+		Line(FColor(255, 120, 90), Flash);
+	}
+	Line(FColor(120, 200, 140), bHailMode
+		? FString::Printf(TEXT("System 2 %s meshes: %d requested (rain.game.HailCount), %d live   boxes %d/%d   impacts read back: max %d/frame"),
+			bHailGpu ? TEXT("GPU") : TEXT("CPU"), HailCount, LiveCount(Hail), BoxesUsed, RainShield::MaxBoxes, MaxHitsPerCallback)
+		: FString::Printf(TEXT("System 1 GPU sprites: %d requested (rain.game.Count), %d live   boxes %d/%d   hit readback: max %d/frame of %d%s"),
+			RainCount, LiveCount(Rain), BoxesUsed, RainShield::MaxBoxes, MaxHitsPerCallback, RainShield::ExportCapacity,
+			SaturatedCallbacks > 0 ? *FString::Printf(TEXT("   SATURATED %d frames"), SaturatedCallbacks) : TEXT("")));
+	for (int32 i = Lines.Num() - 1, Slot = 0; i >= 0; --i, ++Slot)
+	{
+		GEngine->AddOnScreenDebugMessage(Key + Slot, 0.0f, Lines[i].Key, Lines[i].Value, false, Slot == Lines.Num() - 1 ? Big : FVector2D(1.15f, 1.15f));
+	}
+	for (int32 Slot = Lines.Num(); Slot < 8; ++Slot)
+	{
+		GEngine->RemoveOnScreenDebugMessage(Key + Slot);
+	}
 }
 
 // ---------------------------------------------------------------------------------------------- sweep
 
-void ARainShieldGame::StartSweep(const TArray<int32>& Counts, float SettleSeconds, float MeasureSeconds)
+void ARainShieldGame::StartSweep(const TArray<int32>& Counts, bool bHail, float SettleSeconds, float MeasureSeconds)
 {
 	if (Counts.Num() == 0)
 	{
@@ -1001,24 +1227,34 @@ void ARainShieldGame::StartSweep(const TArray<int32>& Counts, float SettleSecond
 	}
 	if (GEngine)
 	{
-		// Uncapped: the frame time is the work, not a frame limiter or vsync.
+		// Uncapped: the frame time is the work, not a frame limiter or vsync. stat unit: the thread and GPU times
+		// read below (also on screen, for the video).
 		GEngine->Exec(GetWorld(), TEXT("t.MaxFPS 0"));
 		GEngine->Exec(GetWorld(), TEXT("r.VSync 0"));
 		GEngine->Exec(GetWorld(), TEXT("fx.ParticlePerfStats.Enabled 1"));
+		if (GEngine->GameViewport && !GEngine->GameViewport->IsStatEnabled(TEXT("Unit")))
+		{
+			GEngine->Exec(GetWorld(), TEXT("stat unit"));
+		}
 	}
+	// A scored round that never ends, in the selected weather.
+	bSweepHail = bHail;
+	SweepIndex = 0;
+	bHailMode = bHail;
 	if (Phase == ERainShieldPhase::Plan)
 	{
 		StartRound();
 	}
+	Phase = ERainShieldPhase::Raining;
+	UploadRain();
 	SweepCounts = Counts;
 	SweepSettle = FMath::Max(SettleSeconds, 0.5f);
 	SweepMeasure = FMath::Max(MeasureSeconds, 0.5f);
-	SweepCsv = TEXT("system,count_requested,count_live,frames,frame_ms,frame_ms_max,fps,game_thread_ms,render_thread_ms,gpu_ms,niagara_gt_ms,niagara_rt_ms,niagara_gpu_ms,hits_per_s\n");
-	SweepIndex = 0;
+	SweepCsv = TEXT("system,count_requested,count_live,frames,frame_ms,frame_ms_max,fps,game_thread_ms,render_thread_ms,gpu_ms,niagara_gt_ms,niagara_rt_ms,niagara_gpu_ms,events_per_s,resolution\n");
 	bSweepMeasuring = false;
 	SweepTimer = 0.0f;
-	SetRainCount(SweepCounts[0]);
-	UE_LOG(LogTemp, Display, TEXT("rain.game.Sweep: %d levels"), SweepCounts.Num());
+	bHail ? SetHailCount(SweepCounts[0]) : SetRainCount(SweepCounts[0]);
+	UE_LOG(LogTemp, Display, TEXT("rain.game.Sweep: %s, %d levels"), bHail ? TEXT("hail") : TEXT("rain"), SweepCounts.Num());
 }
 
 void ARainShieldGame::TickSweep(float DeltaSeconds)
@@ -1029,18 +1265,19 @@ void ARainShieldGame::TickSweep(float DeltaSeconds)
 	}
 	const float RealDt = float(FApp::GetDeltaTime());
 	SweepTimer += RealDt;
+	const int32 Requested = bSweepHail ? HailCount : RainCount;
 	if (!bSweepMeasuring)
 	{
-		// Settle: the new instance has spawned (the GPU count is read back a few frames late) and filled the stream.
-		const int32 Live = GetLiveParticleCount();
-		const bool bCounted = FMath::Abs(Live - RainCount) <= FMath::Max(RainCount / 100, 0);
+		// Settle: the new instance has spawned (GPU counts are read back a few frames late) and filled the stream.
+		const int32 Live = LiveCount(bSweepHail ? Hail : Rain);
+		const bool bCounted = FMath::Abs(Live - Requested) <= Requested / 100;
 		if (SweepTimer >= SweepSettle && (bCounted || SweepTimer > SweepSettle + 5.0f))
 		{
 			bSweepMeasuring = true;
 			SweepTimer = 0.0f;
 			SweepFrames = 0;
 			SweepFrameMs = SweepFrameMsMax = SweepGameMs = SweepRenderMs = SweepGpuMs = 0.0;
-			SweepHitsAtStart = Hits;
+			SweepHitsAtStart = Hits + BlockerImpacts;
 			SweepListener = MakeShared<FParticlePerfStatsListener_GatherAll, ESPMode::ThreadSafe>(false, true, false);
 			FParticlePerfStatsManager::AddListener(SweepListener);
 		}
@@ -1049,9 +1286,13 @@ void ARainShieldGame::TickSweep(float DeltaSeconds)
 	++SweepFrames;
 	SweepFrameMs += RealDt * 1000.0;
 	SweepFrameMsMax = FMath::Max(SweepFrameMsMax, RealDt * 1000.0);
-	SweepGameMs += FPlatformTime::ToMilliseconds(GGameThreadTime);
-	SweepRenderMs += FPlatformTime::ToMilliseconds(GRenderThreadTime);
-	SweepGpuMs += FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles(0));
+	// stat unit's raw per-frame times (ms).
+	if (const FStatUnitData* Unit = GEngine && GEngine->GameViewport ? GEngine->GameViewport->GetStatUnitData() : nullptr)
+	{
+		SweepGameMs += Unit->RawGameThreadTime;
+		SweepRenderMs += Unit->RawRenderThreadTime;
+		SweepGpuMs += Unit->RawGPUFrameTime[0];
+	}
 	if (SweepTimer >= SweepMeasure)
 	{
 		FinishSweepLevel();
@@ -1060,12 +1301,13 @@ void ARainShieldGame::TickSweep(float DeltaSeconds)
 
 void ARainShieldGame::FinishSweepLevel()
 {
+	UNiagaraComponent* Target = bSweepHail ? Hail : Rain;
 	const double N = FMath::Max(SweepFrames, 1);
 	double NiagaraGt = 0.0, NiagaraRt = 0.0, NiagaraGpu = 0.0;
 #if WITH_PER_SYSTEM_PARTICLE_PERF_STATS
 	if (SweepListener)
 	{
-		if (FAccumulatedParticlePerfStats* Stats = SweepListener->GetStats(Rain->GetAsset()))
+		if (FAccumulatedParticlePerfStats* Stats = SweepListener->GetStats(Target->GetAsset()))
 		{
 			// Per frame, in microseconds.
 			NiagaraGt = Stats->GetGameThreadStats().GetPerFrameAvg() / 1000.0;
@@ -1079,10 +1321,17 @@ void ARainShieldGame::FinishSweepLevel()
 		FParticlePerfStatsManager::RemoveListener(SweepListener.Get());
 		SweepListener.Reset();
 	}
+	FIntPoint Resolution(0, 0);
+	if (GEngine && GEngine->GameViewport && GEngine->GameViewport->Viewport)
+	{
+		Resolution = GEngine->GameViewport->Viewport->GetSizeXY();
+	}
+	const TCHAR* SystemName = bSweepHail ? (bHailGpu ? TEXT("System2_hail_GPU_meshes") : TEXT("System2_hail_CPU_meshes")) : TEXT("System1_rain_GPU_sprites");
 	const double FrameMs = SweepFrameMs / N;
-	const FString Row = FString::Printf(TEXT("System1_GPU_sprites,%d,%d,%d,%.3f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f\n"),
-		RainCount, GetLiveParticleCount(), SweepFrames, FrameMs, SweepFrameMsMax, 1000.0 / FMath::Max(FrameMs, 1e-3),
-		SweepGameMs / N, SweepRenderMs / N, SweepGpuMs / N, NiagaraGt, NiagaraRt, NiagaraGpu, (Hits - SweepHitsAtStart) / FMath::Max(SweepTimer, 1e-3f));
+	const FString Row = FString::Printf(TEXT("%s,%d,%d,%d,%.3f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%dx%d\n"),
+		SystemName, bSweepHail ? HailCount : RainCount, LiveCount(Target), SweepFrames, FrameMs, SweepFrameMsMax, 1000.0 / FMath::Max(FrameMs, 1e-3),
+		SweepGameMs / N, SweepRenderMs / N, SweepGpuMs / N, NiagaraGt, NiagaraRt, NiagaraGpu,
+		(Hits + BlockerImpacts - SweepHitsAtStart) / FMath::Max(SweepTimer, 1e-3f), Resolution.X, Resolution.Y);
 	SweepCsv += Row;
 	UE_LOG(LogTemp, Display, TEXT("rain.game.Sweep %s"), *Row.TrimEnd());
 
@@ -1092,7 +1341,7 @@ void ARainShieldGame::FinishSweepLevel()
 	{
 		const FString Dir = FPaths::ProjectSavedDir() / TEXT("Sweeps");
 		IFileManager::Get().MakeDirectory(*Dir, true);
-		LastSweepFile = FPaths::ConvertRelativePathToFull(Dir / FString::Printf(TEXT("RainShield_System1_%s.csv"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"))));
+		LastSweepFile = FPaths::ConvertRelativePathToFull(Dir / FString::Printf(TEXT("RainShield_%s_%s.csv"), SystemName, *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"))));
 		FFileHelper::SaveStringToFile(SweepCsv, *LastSweepFile);
 		UE_LOG(LogTemp, Display, TEXT("rain.game.Sweep: wrote %s"), *LastSweepFile);
 		if (GEngine)
@@ -1100,10 +1349,52 @@ void ARainShieldGame::FinishSweepLevel()
 			GEngine->AddOnScreenDebugMessage(0x5348494540ull, 10.0f, FColor::Green, FString::Printf(TEXT("Sweep written: %s"), *LastSweepFile));
 		}
 		SweepIndex = INDEX_NONE;
-		SetRainCount(FMath::Max(CVarRainGameCount.GetValueOnGameThread(), 0));
+		bSweepHail ? SetHailCount(FMath::Max(CVarRainGameHailCount.GetValueOnGameThread(), 0)) : SetRainCount(FMath::Max(CVarRainGameCount.GetValueOnGameThread(), 0));
+		if (bQuitAfterSweep && GEngine)
+		{
+			GEngine->Exec(GetWorld(), TEXT("quit"));
+		}
 		return;
 	}
 	bSweepMeasuring = false;
 	SweepTimer = 0.0f;
-	SetRainCount(SweepCounts[SweepIndex]);
+	bSweepHail ? SetHailCount(SweepCounts[SweepIndex]) : SetRainCount(SweepCounts[SweepIndex]);
+}
+
+FString ARainShieldGame::DebugHailParticles(int32 Max) const
+{
+	FString Out;
+	FNiagaraSystemInstanceControllerConstPtr SIC = Hail ? Hail->GetSystemInstanceController() : nullptr;
+	const FNiagaraSystemInstance* Instance = SIC ? SIC->GetSystemInstance_Unsafe() : nullptr;
+	if (!Instance)
+	{
+		return TEXT("no hail instance");
+	}
+	for (const FNiagaraEmitterInstanceRef& Emitter : Instance->GetEmitters())
+	{
+		if (Emitter->GetGPUContext())
+		{
+			Out += TEXT("GPU emitter: not readable here\n");
+			continue;
+		}
+		const FNiagaraDataSet& Data = Emitter->GetParticleData();
+		const FNiagaraDataBuffer* Buffer = Data.GetCurrentData();
+		const int32 Num = Buffer ? int32(Buffer->GetNumInstances()) : 0;
+		auto Pos = FNiagaraDataSetAccessor<FNiagaraPosition>::CreateReader(Data, TEXT("Position"));
+		auto Vel = FNiagaraDataSetAccessor<FVector3f>::CreateReader(Data, TEXT("Velocity"));
+		auto State = FNiagaraDataSetAccessor<float>::CreateReader(Data, TEXT("HailState"));
+		auto Radius = FNiagaraDataSetAccessor<float>::CreateReader(Data, TEXT("HailRadius"));
+		auto Impact = FNiagaraDataSetAccessor<FVector3f>::CreateReader(Data, TEXT("HailImpact"));
+		auto Timer = FNiagaraDataSetAccessor<float>::CreateReader(Data, TEXT("HailTimer"));
+		auto Cycle = FNiagaraDataSetAccessor<float>::CreateReader(Data, TEXT("HailCycle"));
+		auto Angle = FNiagaraDataSetAccessor<float>::CreateReader(Data, TEXT("HailAngle"));
+		Out += FString::Printf(TEXT("%d particles\n"), Num);
+		for (int32 i = 0; i < Num && i < Max; ++i)
+		{
+			const int32 j = i * FMath::Max(Num / FMath::Max(Max, 1), 1);
+			Out += FString::Printf(TEXT("%d pos %s vel %s state %.2f r %.2f impact %s timer %g cycle %g angle %g\n"), j, *FVector3f(Pos.Get(j)).ToString(), *Vel.Get(j).ToString(),
+				State.Get(j), Radius.Get(j), *Impact.Get(j).ToString(), Timer.Get(j), Cycle.Get(j), Angle.Get(j));
+		}
+	}
+	return Out;
 }
