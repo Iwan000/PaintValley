@@ -20,6 +20,7 @@
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionTime.h"
+#include "Materials/MaterialExpressionVertexColor.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEmitter.h"
@@ -1152,4 +1153,148 @@ FString URainBuilderLibrary::BuildRainHailAssets(int32 HailCount)
 		SaveAsset(System);
 	}
 	return FString::Printf(TEXT("%s\n%s"), bOk ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
+}
+
+// ---------------------------------------------------------------------------------------------- Paint Valley
+// The Monument Valley look of the paint game: one unlit material for every surface (face tones by direction,
+// the atlas's AO, openings, edges and paint) and one for the backdrop. MPC_Paint carries the key direction.
+
+namespace
+{
+	UMaterialParameterCollection* BuildPaintCollection()
+	{
+		const FString Path = RainRoot / TEXT("Materials/MPC_Paint");
+		UMaterialParameterCollection* MPC = LoadObject<UMaterialParameterCollection>(nullptr, *(Path + TEXT(".MPC_Paint")), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!MPC)
+		{
+			UPackage* Package = CreatePackage(*Path);
+			MPC = NewObject<UMaterialParameterCollection>(Package, TEXT("MPC_Paint"), RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(MPC);
+		}
+		if (!MPC->GetVectorParameterByName(TEXT("Key")))
+		{
+			FCollectionVectorParameter P;
+			P.ParameterName = TEXT("Key");
+			P.DefaultValue = FLinearColor(-0.7071f, 0.7071f, 0.0f, 0.0f);
+			MPC->VectorParameters.Add(P);
+			MPC->PostEditChange();
+		}
+		SaveAsset(MPC);
+		return MPC;
+	}
+
+	// A Custom node fed by parameters: Inputs are (input name, expression) in order.
+	UMaterialExpressionCustom* AddCustom(UMaterial* M, const TCHAR* File, ECustomMaterialOutputType Output)
+	{
+		UMaterialExpressionCustom* Custom = AddExpr<UMaterialExpressionCustom>(M, -300, 0);
+		Custom->Description = FString::Printf(TEXT("%s"), File);
+		Custom->Code = LoadTextFile(File);
+		Custom->OutputType = Output;
+		Custom->Inputs.Reset();
+		return Custom;
+	}
+
+	// Output: 0 for a vector parameter's RGB, 5 for its RGBA.
+	void AddCustomInput(UMaterialExpressionCustom* Custom, const TCHAR* Name, UMaterialExpression* From, int32 Output = 0)
+	{
+		FCustomInput& In = Custom->Inputs.AddDefaulted_GetRef();
+		In.InputName = Name;
+		In.Input.Connect(Output, From);
+	}
+
+	UMaterial* BuildPaintSurfaceMaterial(UMaterialParameterCollection* MPC, FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_PaintSurface"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Opaque;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = true;
+		UMaterialExpressionCustom* Custom = AddCustom(M, TEXT("Materials/HLSL/PaintSurface.hlsl"), CMOT_Float3);
+		int32 Y = -600;
+		auto Vec = [M, &Y](const TCHAR* Name, const FLinearColor& Default)
+		{
+			UMaterialExpressionVectorParameter* P = AddExpr<UMaterialExpressionVectorParameter>(M, -900, Y += 90);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		UMaterialExpressionTextureObjectParameter* Atlas = AddExpr<UMaterialExpressionTextureObjectParameter>(M, -900, Y += 90);
+		Atlas->ParameterName = TEXT("Atlas");
+		Atlas->Texture = LoadObject<UTexture>(nullptr, TEXT("/Engine/EngineResources/Black.Black"));
+		Atlas->SamplerType = SAMPLERTYPE_LinearColor;
+		AddCustomInput(Custom, TEXT("Atlas"), Atlas);
+		UMaterialExpressionTextureCoordinate* UV = AddExpr<UMaterialExpressionTextureCoordinate>(M, -900, Y += 90);
+		AddCustomInput(Custom, TEXT("UV"), UV);
+		UMaterialExpressionScalarParameter* UseAtlas = AddExpr<UMaterialExpressionScalarParameter>(M, -900, Y += 90);
+		UseAtlas->ParameterName = TEXT("UseAtlas");
+		UseAtlas->DefaultValue = 1.0f;
+		AddCustomInput(Custom, TEXT("UseAtlas"), UseAtlas);
+		AddCustomInput(Custom, TEXT("Top"), Vec(TEXT("Top"), FLinearColor(0.8f, 0.8f, 0.8f)));
+		AddCustomInput(Custom, TEXT("LightC"), Vec(TEXT("Light"), FLinearColor(0.6f, 0.6f, 0.6f)));
+		AddCustomInput(Custom, TEXT("DarkC"), Vec(TEXT("Dark"), FLinearColor(0.4f, 0.4f, 0.4f)));
+		AddCustomInput(Custom, TEXT("Bottom"), Vec(TEXT("Bottom"), FLinearColor(0.3f, 0.3f, 0.3f)));
+		AddCustomInput(Custom, TEXT("AOColor"), Vec(TEXT("AOColor"), FLinearColor(0.5f, 0.45f, 0.5f)));
+		AddCustomInput(Custom, TEXT("GradColor"), Vec(TEXT("GradColor"), FLinearColor(0.78f, 0.75f, 0.35f)));
+		AddCustomInput(Custom, TEXT("OpeningColor"), Vec(TEXT("OpeningColor"), FLinearColor(0.2f, 0.12f, 0.08f)));
+		AddCustomInput(Custom, TEXT("InkColor"), Vec(TEXT("InkColor"), FLinearColor(0.25f, 0.05f, 0.9f)));
+		AddCustomInput(Custom, TEXT("Grad"), Vec(TEXT("Grad"), FLinearColor(0.0f, 100.0f, 0.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("Fade"), Vec(TEXT("Fade"), FLinearColor(-100.0f, 0.0f, 0.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("EdgeColor"), Vec(TEXT("EdgeColor"), FLinearColor(1.0f, 1.0f, 1.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("OpeningRim"), Vec(TEXT("OpeningRim"), FLinearColor(0.6f, 0.5f, 0.4f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("OpeningBarrel"), Vec(TEXT("OpeningBarrel"), FLinearColor(0.4f, 0.3f, 0.2f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("AtlasTexel"), Vec(TEXT("AtlasTexel"), FLinearColor(1.0f / 1024.0f, 1.0f / 256.0f, 2.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("Tile"), Vec(TEXT("Tile"), FLinearColor(0.0f, 1.0f, 0.0f, 0.0f)), 5);
+		UMaterialExpressionVertexColor* VColor = AddExpr<UMaterialExpressionVertexColor>(M, -900, Y += 90);
+		AddCustomInput(Custom, TEXT("VColor"), VColor, 0);
+		UMaterialExpressionCollectionParameter* Key = AddExpr<UMaterialExpressionCollectionParameter>(M, -900, Y += 90);
+		Key->Collection = MPC;
+		Key->ParameterName = TEXT("Key");
+		Key->ParameterId = MPC->GetParameterId(TEXT("Key"));
+		AddCustomInput(Custom, TEXT("Key"), Key);
+		AddCustomInput(Custom, TEXT("FadeColor"), Vec(TEXT("FadeColor"), FLinearColor(1.0f, 0.8f, 0.7f)));
+		M->GetEditorOnlyData()->EmissiveColor.Connect(0, Custom);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+
+	UMaterial* BuildPaintBackdropMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_PaintBackdrop"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Opaque;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = true;
+		UMaterialExpressionCustom* Custom = AddCustom(M, TEXT("Materials/HLSL/PaintBackdrop.hlsl"), CMOT_Float3);
+		int32 Y = -300;
+		auto Vec = [M, &Y](const TCHAR* Name, const FLinearColor& Default)
+		{
+			UMaterialExpressionVectorParameter* P = AddExpr<UMaterialExpressionVectorParameter>(M, -900, Y += 90);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		AddCustomInput(Custom, TEXT("Center"), Vec(TEXT("Center"), FLinearColor(1.0f, 0.82f, 0.72f)));
+		AddCustomInput(Custom, TEXT("Edge"), Vec(TEXT("Edge"), FLinearColor(1.0f, 0.75f, 0.62f)));
+		AddCustomInput(Custom, TEXT("Glow"), Vec(TEXT("Glow"), FLinearColor(0.92f, 0.5f, 0.3f)));
+		AddCustomInput(Custom, TEXT("GlowPos"), Vec(TEXT("GlowPos"), FLinearColor(0.15f, 0.95f, 0.35f, 0.6f)), 5);
+		AddCustomInput(Custom, TEXT("Shadow"), Vec(TEXT("Shadow"), FLinearColor(0.0f, 0.0f, -5000.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("ShadowSize"), Vec(TEXT("ShadowSize"), FLinearColor(100.0f, 30.0f, 0.0f, 0.0f)), 5);
+		AddCustomInput(Custom, TEXT("ShadowColor"), Vec(TEXT("ShadowColor"), FLinearColor(0.9f, 0.6f, 0.45f, 0.0f)), 5);
+		UMaterialExpressionScalarParameter* Spread = AddExpr<UMaterialExpressionScalarParameter>(M, -900, Y += 90);
+		Spread->ParameterName = TEXT("Spread");
+		Spread->DefaultValue = 0.9f;
+		AddCustomInput(Custom, TEXT("Spread"), Spread);
+		M->GetEditorOnlyData()->EmissiveColor.Connect(0, Custom);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+}
+
+FString URainBuilderLibrary::BuildPaintAssets()
+{
+	FString Report;
+	UMaterialParameterCollection* MPC = BuildPaintCollection();
+	bool bOk = BuildPaintSurfaceMaterial(MPC, Report) != nullptr;
+	bOk &= BuildPaintBackdropMaterial(Report) != nullptr;
+	return FString::Printf(TEXT("%s\n%s"), Report.Contains(TEXT("ERROR")) ? TEXT("FAILED") : TEXT("SUCCESS"), *Report);
 }

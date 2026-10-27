@@ -38,6 +38,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildStageMaterials();
 
+	/** Builds the Paint Valley look: MPC_Paint (key direction), M_PaintSurface (Monument Valley face tones, baked AO,
+	 *  openings, edges and paint from the level's atlas; Materials/HLSL/PaintSurface.hlsl) and M_PaintBackdrop. */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString BuildPaintAssets();
+
 	/** Diagnostics: lists every script of a system with its usage, sim target and rapid-iteration parameters. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString DescribeNiagaraSystem(const FString& ObjectPath);
