@@ -948,6 +948,17 @@ void ARainShieldGame::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	// The film rain hands over to the game: kept off. Its actor auto-activates in its own BeginPlay, which can come
+	// after ours (the Niagara debug HUD showed its 245k drops still simulating, hidden, in every early measurement).
+	if (Controller && Controller->RainActor)
+	{
+		UNiagaraComponent* FilmRain = Controller->RainActor->GetNiagaraComponent();
+		if (FilmRain && FilmRain->IsActive())
+		{
+			FilmRain->SetAutoActivate(false);
+			FilmRain->DeactivateImmediate();
+		}
+	}
 	if (!bViewSet && PC && Camera)
 	{
 		PC->SetViewTarget(Camera);
@@ -1309,6 +1320,17 @@ void ARainShieldGame::TickSweep(float DeltaSeconds)
 			SweepHitsAtStart = Hits + BlockerImpacts;
 			SweepListener = MakeShared<FParticlePerfStatsListener_GatherAll, ESPMode::ThreadSafe>(false, true, false);
 			FParticlePerfStatsManager::AddListener(SweepListener);
+			// -RainLateExec="cmd,cmd": console commands once the first level is measuring (e.g. ProfileGPU).
+			FString LateExec;
+			if (SweepIndex == 0 && GEngine && FParse::Value(FCommandLine::Get(), TEXT("RainLateExec="), LateExec, false))
+			{
+				TArray<FString> Commands;
+				LateExec.ParseIntoArray(Commands, TEXT(","));
+				for (const FString& Command : Commands)
+				{
+					GEngine->Exec(GetWorld(), *Command.TrimStartAndEnd());
+				}
+			}
 		}
 		return;
 	}

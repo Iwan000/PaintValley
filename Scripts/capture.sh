@@ -12,7 +12,7 @@ WINID="/Users/guocheng/ProjectRain/Saved/Tools/winid"
 pkill -9 -f "UnrealEditor.app/Contents/MacOS/UnrealEditor"; sleep 2
 "$UE/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor" "$PROJ" /Game/RainMagic/Maps/L_RainShield -game -windowed \
   -ResX=1920 -ResY=1080 -ForceRes -RainSweep=$SWEEP -RainSweepSettle=3 -RainSweepMeasure=30 -RainSweepQuit \
-  "-ExecCmds=$CMDS" "$@" -NoSplash -unattended > /dev/null 2>&1 &
+  "-ExecCmds=$CMDS" "$@" -abslog=/Users/guocheng/ProjectRain/Saved/Logs/Capture_$NAME.log -NoSplash -unattended > /dev/null 2>&1 &
 PID=$!
 sleep 22
 screencapture -x -o -l$("$WINID" UnrealEditor) "/Users/guocheng/ProjectRain/Docs/Perf/$NAME.png"
