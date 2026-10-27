@@ -442,6 +442,11 @@ void ARainShieldGame::BeginPlay()
 		bQuitAfterSweep = FParse::Param(FCommandLine::Get(), TEXT("RainSweepQuit"));
 		PendingSweepDelay = 4.0f;
 	}
+	if (FParse::Param(FCommandLine::Get(), TEXT("RainDemo")))
+	{
+		bQuitAfterDemo = FParse::Param(FCommandLine::Get(), TEXT("RainDemoQuit"));
+		PendingDemoDelay = 3.0f;
+	}
 }
 
 void ARainShieldGame::SetupSystem(UNiagaraComponent* Component, UNiagaraSystem* System, int32 Count)
@@ -750,6 +755,9 @@ void ARainShieldGame::SetDirection(int32 Index)
 	if (Phase == ERainShieldPhase::Plan)
 	{
 		DirectionIndex = (Index % Directions.Num() + Directions.Num()) % Directions.Num();
+		// The waiting drops re-park upwind of the new face now: parked along the old direction, they would wrap
+		// into the middle of the grid when the round starts and hit the shape at once.
+		UploadRain();
 	}
 }
 
@@ -1011,6 +1019,15 @@ void ARainShieldGame::Tick(float DeltaSeconds)
 		}
 	}
 	FlashTime -= DeltaSeconds;
+	if (PendingDemoDelay > 0.0f)
+	{
+		PendingDemoDelay -= float(FApp::GetDeltaTime());
+		if (PendingDemoDelay <= 0.0f)
+		{
+			StartDemo();
+		}
+	}
+	TickDemo(DeltaSeconds);
 
 	HandleInput(DeltaSeconds);
 	UpdateCamera();
@@ -1198,6 +1215,10 @@ void ARainShieldGame::ShowHud() const
 	auto Line = [&Lines](const FColor& Color, const FString& Text) { Lines.Add({ Color, Text }); };
 	static const TCHAR* PhaseNames[] = { TEXT("PLAN"), TEXT("FALLING"), TEXT("RESULT") };
 	const TCHAR* Weather = bHailMode ? TEXT("HAIL") : TEXT("RAIN");
+	if (!Caption.IsEmpty())
+	{
+		Line(FColor(255, 236, 190), Caption);
+	}
 	Line(FColor(230, 235, 255), FString::Printf(TEXT("RAIN SHIELD   level %d/%d: %s   [%s]   weather: %s"), LevelIndex + 1, Levels.Num(), *Level.Name, PhaseNames[int32(Phase)], Weather));
 	auto StarText = [](int32 Stars) { return FString::ChrN(Stars, TEXT('*')) + FString::ChrN(3 - Stars, TEXT('-')); };
 	if (Phase == ERainShieldPhase::Plan)
@@ -1244,7 +1265,9 @@ void ARainShieldGame::ShowHud() const
 			SaturatedCallbacks > 0 ? *FString::Printf(TEXT("   SATURATED %d frames"), SaturatedCallbacks) : TEXT("")));
 	for (int32 i = Lines.Num() - 1, Slot = 0; i >= 0; --i, ++Slot)
 	{
-		GEngine->AddOnScreenDebugMessage(Key + Slot, 0.0f, Lines[i].Key, Lines[i].Value, false, Slot == Lines.Num() - 1 ? Big : FVector2D(1.15f, 1.15f));
+		const bool bCaption = !Caption.IsEmpty() && i == 0;
+		const bool bTitle = i == (Caption.IsEmpty() ? 0 : 1);
+		GEngine->AddOnScreenDebugMessage(Key + Slot, 0.0f, Lines[i].Key, Lines[i].Value, false, bCaption ? FVector2D(1.9f, 1.9f) : (bTitle ? Big : FVector2D(1.15f, 1.15f)));
 	}
 	for (int32 Slot = Lines.Num(); Slot < 8; ++Slot)
 	{
@@ -1450,4 +1473,76 @@ FString ARainShieldGame::DebugHailParticles(int32 Max) const
 		}
 	}
 	return Out;
+}
+
+// ---------------------------------------------------------------------------------------------- demo
+
+void ARainShieldGame::StartDemo()
+{
+	auto Exec = [this](const TCHAR* Command) { return [this, Command]() { GEngine->Exec(GetWorld(), Command); }; };
+	auto Say = [this](const TCHAR* Text) { return [this, Text]() { Caption = Text; }; };
+	auto Move = [this](FIntVector Delta) { return [this, Delta]() { MovePiece(Delta); }; };
+	auto Dir = [this](int32 Index) { return [this, Index]() { SetDirection(Index); }; };
+	const float SavedLife = BlockerLifeSeconds;
+	DemoSteps = {
+		{ 0.0f, [this, Exec]() { Exec(TEXT("rain.game.Count 200000"))(); Exec(TEXT("rain.game.HailCount 2000"))(); Exec(TEXT("rain.game.HailGPU 0"))();
+			StartLevel(0); SetHailMode(false); SetOrbit(-40.0f, -16.0f, 900.0f); DemoOrbitSpeed = 5.0f;
+			Exec(TEXT("fx.Niagara.Debug.Hud OverviewLocation=30,690"))(); } },
+		{ 0.0f, Say(TEXT("Keep the shape dry. The particles decide the score.")) },
+		{ 3.5f, Say(TEXT("Plan: place the pieces the level gives you in the 10x10x10 grid")) },
+		{ 4.0f, Move({ 1, 0, 0 }) }, { 4.4f, Move({ 0, 1, 0 }) }, { 4.8f, Move({ -1, 0, 0 }) }, { 5.2f, Move({ 0, -1, 0 }) },
+		{ 5.6f, Move({ 0, 0, -1 }) }, { 6.0f, Move({ 0, 0, 1 }) },
+		{ 6.6f, [this]() { PlacePiece(); } },
+		{ 7.0f, Say(TEXT("...then choose where the rain comes from: 26 directions, locked once it starts")) },
+		{ 7.4f, Dir(2) }, { 7.9f, Dir(4) }, { 8.4f, Dir(9) }, { 8.9f, Dir(20) }, { 9.4f, Dir(1) }, { 9.9f, Dir(0) },
+		{ 10.5f, [this]() { StartRound(); } },
+		{ 10.5f, Say(TEXT("System 1: 200,000 GPU raindrops. Every hit on the shape is read back from the GPU")) },
+		{ 17.0f, Say(TEXT("Unshielded, from the side: the hits track the predicted flux, so the score is fair at any particle count")) },
+		{ 17.0f, [this]() { StartLevel(0); SetDirection(2); StartRound(); } },
+		{ 24.5f, [this]() { StartLevel(1); SetDirection(0); SetOrbit(OrbitYaw, -22.0f, 950.0f); } },
+		{ 24.5f, Say(TEXT("Level 2, a lamp post: from above, two small pieces are enough")) },
+		{ 25.3f, Move({ 0, 1, 0 }) }, { 25.8f, Move({ 0, 0, -1 }) }, { 26.3f, [this]() { PlacePiece(); } },
+		{ 27.0f, Move({ 0, 0, -1 }) }, { 27.5f, Move({ 0, 0, -1 }) }, { 28.0f, [this]() { PlacePiece(); } },
+		{ 28.6f, [this]() { StartRound(); } },
+		{ 35.0f, Say(TEXT("System 2: 2,000 CPU-simulated hailstones. They bounce, pile up and melt")) },
+		{ 35.0f, [this]() { BlockerLifeSeconds = 7.0f; StartLevel(0); SetDirection(0); SetHailMode(true); PlacePiece(); SetOrbit(OrbitYaw, -12.0f, 800.0f); StartRound(); } },
+		{ 43.0f, Say(TEXT("Impacts are events to gameplay: blockers wear down and break")) },
+		{ 52.0f, [this, SavedLife]() { BlockerLifeSeconds = SavedLife; StartLevel(0); SetDirection(0); SetHailMode(false); SetOrbit(OrbitYaw, -16.0f, 900.0f); StartRound(); } },
+		{ 52.0f, Exec(TEXT("stat unit")) }, { 52.0f, Exec(TEXT("NiagaraDebugHud 1")) },
+		{ 52.0f, Say(TEXT("Scaling, live (rain.game.Count): 200k drops")) },
+		{ 56.0f, Exec(TEXT("rain.game.Count 400000")) }, { 56.0f, Say(TEXT("Scaling, live (rain.game.Count): 400k drops")) },
+		{ 60.0f, Exec(TEXT("rain.game.Count 800000")) }, { 60.0f, Say(TEXT("Scaling, live (rain.game.Count): 800k drops")) },
+		{ 64.0f, Exec(TEXT("rain.game.Count 1600000")) }, { 64.0f, Say(TEXT("Scaling, live (rain.game.Count): 1.6M drops: GPU-bound, Niagara CPU stays ~0.1 ms")) },
+		{ 69.0f, Exec(TEXT("rain.game.Count 200000")) },
+		{ 69.0f, [this, Exec]() { Exec(TEXT("rain.game.HailCount 20000"))(); StartLevel(0); SetDirection(0); SetHailMode(true); StartRound(); } },
+		{ 69.0f, Exec(TEXT("NiagaraDebugHud 3")) },
+		{ 69.0f, Say(TEXT("20,000 hailstones on the CPU: Niagara CPU time past the 4 ms budget")) },
+		{ 75.0f, Exec(TEXT("rain.game.HailGPU 1")) },
+		{ 75.0f, Say(TEXT("The same HLSL ported to the GPU: Niagara CPU time ~0.05 ms")) },
+		{ 81.0f, Exec(TEXT("NiagaraDebugHud 0")) }, { 81.0f, Exec(TEXT("stat unit")) },
+		{ 81.0f, [this, Exec]() { Exec(TEXT("rain.game.HailGPU 0"))(); Exec(TEXT("rain.game.HailCount 2000"))(); StartLevel(2); SetHailMode(false); } },
+		{ 81.0f, Say(TEXT("Rain Shield  |  UE 5.7, C++, Niagara  |  two systems, one mechanic")) },
+		{ 88.0f, [this]() { if (bQuitAfterDemo) { GEngine->Exec(GetWorld(), TEXT("quit")); } } },
+	};
+	DemoNext = 0;
+	DemoClock = 0.0f;
+}
+
+void ARainShieldGame::TickDemo(float DeltaSeconds)
+{
+	if (DemoClock < 0.0f)
+	{
+		return;
+	}
+	DemoClock += DeltaSeconds;
+	OrbitYaw += DemoOrbitSpeed * DeltaSeconds;
+	while (DemoSteps.IsValidIndex(DemoNext) && DemoSteps[DemoNext].At <= DemoClock)
+	{
+		DemoSteps[DemoNext++].Do();
+	}
+	if (!DemoSteps.IsValidIndex(DemoNext))
+	{
+		DemoClock = -1.0f;
+		DemoOrbitSpeed = 0.0f;
+	}
 }

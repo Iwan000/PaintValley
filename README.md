@@ -13,6 +13,7 @@ The same mechanic has two configurations; press **G** to switch between them whi
 | Back to gameplay | Each hit on the shape → Export Particle Data (GPU readback) → score | Each impact → Export Particle Data → hit on the shape, or damage to a blocker (it breaks at 0 hit points) |
 
 **Performance report:** `Docs/PerformanceReport.pdf` (2 pages). Data: `Docs/Perf/*.csv`. Profiler captures: `Docs/Perf/*.jpg`.
+**Video:** `Renders/RainShield_video.mp4` (90 s, 1080p; video files are not in git). It is a recording of the scripted tour `-RainDemo` (`Scripts/record_demo.sh`). The stat overlay segment shows `stat unit` and the Niagara debug HUD while the particle count changes live.
 
 ## Build and run
 

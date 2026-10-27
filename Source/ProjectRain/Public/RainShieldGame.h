@@ -149,6 +149,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetLiveParticleCount() const;
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") int32 GetBrokenBlockers() const { return BrokenBlockers; }
 	UFUNCTION(BlueprintPure, Category = "Rain Shield") FString GetLastSweepFile() const { return LastSweepFile; }
+	/** A scripted ~90 s tour for the video (-RainDemo on the command line; -RainDemoQuit quits at the end). */
+	UFUNCTION(BlueprintCallable, Category = "Rain Shield") void StartDemo();
+
 	/** Debug: the first particles of the hail (CPU only) as text: position, velocity, state, radius, impact. */
 	UFUNCTION(BlueprintCallable, Category = "Rain Shield") FString DebugHailParticles(int32 Max = 8) const;
 
@@ -222,6 +225,21 @@ private:
 	bool bViewSet = false;
 	FVector2D LastMouse = FVector2D::ZeroVector;
 	bool bOrbiting = false;
+
+	// Demo (-RainDemo): timed steps, a caption on the HUD, a slowly orbiting camera.
+	struct FDemoStep
+	{
+		float At = 0.0f;
+		TFunction<void()> Do;
+	};
+	TArray<FDemoStep> DemoSteps;
+	int32 DemoNext = 0;
+	float DemoClock = -1.0f;
+	float PendingDemoDelay = -1.0f;
+	bool bQuitAfterDemo = false;
+	float DemoOrbitSpeed = 0.0f;
+	FString Caption;
+	void TickDemo(float DeltaSeconds);
 
 	// Sweep (rain.game.Sweep).
 	TArray<int32> SweepCounts;
