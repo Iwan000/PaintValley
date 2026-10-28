@@ -217,6 +217,26 @@ public:
 	/** The panel's look button, as the HUD drew it (viewport pixels): a click there switches the look. */
 	void SetLookButton(const FBox2D& Rect) { LookButton = Rect; }
 	void SetSystemButton(const FBox2D& Rect) { SystemButton = Rect; }
+	/** The level select: the panel's level button (a click or L opens the list) and the list's rows, as the HUD drew
+	 *  them (viewport pixels; an invalid box hides one). Number keys 1-9 pick a level directly. */
+	void SetLevelButton(const FBox2D& Rect) { LevelButton = Rect; }
+	void SetLevelRow(int32 Index, const FBox2D& Rect);
+	UFUNCTION(BlueprintCallable, Category = "Paint") void SetLevelListOpen(bool bOpen);
+	UFUNCTION(BlueprintPure, Category = "Paint") bool IsLevelListOpen() const { return bLevelListOpen; }
+	/** A click at Screen (viewport pixels) on the level list: picks the row's level and closes the list (also from
+	 *  Python, to test the rows the HUD reported). False when no row is there. */
+	UFUNCTION(BlueprintCallable, Category = "Paint") bool ClickLevelList(FVector2D Screen);
+	/** The centre of the list's row Index as the HUD drew it ((-1, -1) when hidden): for testing ClickLevelList. */
+	UFUNCTION(BlueprintPure, Category = "Paint") FVector2D GetLevelRowCenter(int32 Index) const
+	{
+		return LevelRows.IsValidIndex(Index) && LevelRows[Index].bIsValid ? LevelRows[Index].GetCenter() : FVector2D(-1.0, -1.0);
+	}
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetNumLevels() const { return Levels.Num(); }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetLevelIndex() const { return LevelIndex; }
+	/** Level Index's name, its system (true: paint balls) and par time, for the list. */
+	FString GetLevelNameAt(int32 Index) const { return Levels.IsValidIndex(Index) ? Levels[Index].Name : FString(); }
+	bool IsBallLevel(int32 Index) const { return Levels.IsValidIndex(Index) && Levels[Index].bPaintBalls; }
+	float GetParSecondsAt(int32 Index) const { return Levels.IsValidIndex(Index) ? Levels[Index].ParSeconds : 0.0f; }
 	/** The panel's sliders: 0 the pool's size (before a round; applied on release), 1 the drops' opacity (any time).
 	 *  The HUD draws them where it reports them (viewport pixels; an invalid box hides one). */
 	void SetSliderRect(int32 Slider, const FBox2D& Rect) { if (Slider >= 0 && Slider < 2) { SliderRects[Slider] = Rect; } }
@@ -294,6 +314,9 @@ private:
 	float PaintBallEpoch = 0.0f;
 	FBox2D LookButton = FBox2D(ForceInit);
 	FBox2D SystemButton = FBox2D(ForceInit);
+	FBox2D LevelButton = FBox2D(ForceInit);
+	TArray<FBox2D> LevelRows;
+	bool bLevelListOpen = false;
 	FBox2D SliderRects[2] = { FBox2D(ForceInit), FBox2D(ForceInit) };
 	int32 DraggingSlider = INDEX_NONE;
 	/** The pool slider's count while it is dragged (the pool is rebuilt when it is let go). */

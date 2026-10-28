@@ -75,7 +75,7 @@ void APaintHUD::DrawHUD()
 		Soft, X, Y, Font, 0.75f * S);
 	Y += 30.0f * S;
 
-	// Before a round: buttons for the system (or Tab) and, for the rain, the drops' look (or F).
+	// Before a round: buttons for the level (or L), the system (or Tab) and, for the rain, the drops' look (or F).
 	if (Game->GetPhase() != EPaintPhase::Painting)
 	{
 		const float BW = 250.0f * S, BH = 28.0f * S;
@@ -86,6 +86,30 @@ void APaintHUD::DrawHUD()
 			DrawText(Label, Text, X + 14.0f * S, At + 5.0f * S, Font, 0.85f * S);
 			return FBox2D(FVector2D(X, At), FVector2D(X + BW, At + BH));
 		};
+		const int32 NumLevels = Game->GetNumLevels();
+		Game->SetLevelButton(Button(FString::Printf(TEXT("level %d/%d: %s   (L)"), Game->GetLevelIndex() + 1, NumLevels, *Game->GetLevelName()), Y));
+		// The list, open: one row a level to the right of the panel's column (number, name, system, par); the current
+		// one marked with the ink.
+		if (Game->IsLevelListOpen())
+		{
+			const float LX = X + W + 16.0f * S, LW = 300.0f * S, RH = 28.0f * S, Gap = 3.0f * S;
+			DrawRect(FLinearColor(1.0f, 1.0f, 1.0f, 0.35f), LX - 6.0f * S, Y - 6.0f * S, LW + 12.0f * S, NumLevels * (RH + Gap) - Gap + 12.0f * S);
+			for (int32 i = 0; i < NumLevels; ++i)
+			{
+				const float RY = Y + i * (RH + Gap);
+				const bool bCurrent = i == Game->GetLevelIndex();
+				DrawRect(FLinearColor(1.0f, 1.0f, 1.0f, bCurrent ? 0.95f : 0.7f), LX, RY, LW, RH);
+				if (bCurrent)
+				{
+					DrawRect(FLinearColor(Ink.R, Ink.G, Ink.B, 1.0f), LX, RY, 4.0f * S, RH);
+				}
+				DrawText(FString::Printf(TEXT("%d   %s"), i + 1, *Game->GetLevelNameAt(i)), Text, LX + 14.0f * S, RY + 5.0f * S, Font, 0.85f * S);
+				DrawText(FString::Printf(TEXT("%s   par %.0f s"), Game->IsBallLevel(i) ? TEXT("balls") : TEXT("rain"), Game->GetParSecondsAt(i)),
+					Soft, LX + 170.0f * S, RY + 6.0f * S, Font, 0.75f * S);
+				Game->SetLevelRow(i, FBox2D(FVector2D(LX, RY), FVector2D(LX + LW, RY + RH)));
+			}
+		}
+		Y += BH + 8.0f * S;
 		Game->SetSystemButton(Button(FString::Printf(TEXT("play with: %s   (Tab / M)"), bBalls ? TEXT("paint balls") : TEXT("rain")), Y));
 		Y += BH + 8.0f * S;
 		Game->SetLookButton(bBalls ? FBox2D(ForceInit) : Button(FString::Printf(TEXT("drops: %s   (F)"), Game->GetFilmDrops() ? TEXT("film") : TEXT("paint")), Y));
@@ -93,6 +117,7 @@ void APaintHUD::DrawHUD()
 	}
 	else
 	{
+		Game->SetLevelButton(FBox2D(ForceInit));
 		Game->SetSystemButton(FBox2D(ForceInit));
 		Game->SetLookButton(FBox2D(ForceInit));
 	}
@@ -133,6 +158,6 @@ void APaintHUD::DrawHUD()
 	}
 	// The controls, small, along the bottom left.
 	DrawText(Game->GetFreeze() > 0.5f ? FString(TEXT("the rain is held   (let go of the ball)"))
-		: FString(TEXT("drag the ball: turn the direction    hold it still: stop the rain and the clock    Enter: start    R: again    Q/E: view    wheel: zoom    PgUp/PgDn: level")),
+		: FString(TEXT("drag the ball: turn the direction    hold it still: stop the rain and the clock    Enter: start    R: again    Q/E: view    wheel: zoom    L or 1-8: level")),
 		Soft, X, Canvas->ClipY - 44.0f * S, Font, 0.8f * S);
 }

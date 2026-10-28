@@ -42,7 +42,8 @@ The same mechanic has two configurations; press **Tab** before a round to switch
 | Tab (before a round) | System 1 (rain) or System 2 (paint balls) |
 | F (before a round) | Drops in the air: paint look or film look |
 | Panel sliders | Pool size (before a round); drop opacity |
-| Q / E, wheel, PgUp / PgDn | Turn the view, zoom, change level (8 levels) |
+| L or the panel's level button (before a round) | The level list: click a level to play it. Number keys 1–8 pick one directly; PgUp / PgDn step through them |
+| Q / E, wheel | Turn the view, zoom |
 
 ## Console variables (Paint Valley)
 

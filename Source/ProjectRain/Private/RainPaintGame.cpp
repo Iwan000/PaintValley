@@ -878,6 +878,7 @@ void ARainPaintGame::StartRound()
 		ResetRound();
 	}
 	Phase = EPaintPhase::Painting;
+	SetLevelListOpen(false);
 	Clock = 0.0f;
 	UploadFullFaces();
 	UploadRain();
@@ -1163,6 +1164,41 @@ void ARainPaintGame::EndPlay(const EEndPlayReason::Type Reason)
 		}
 	}
 	Super::EndPlay(Reason);
+}
+
+void ARainPaintGame::SetLevelRow(int32 Index, const FBox2D& Rect)
+{
+	if (Index >= 0)
+	{
+		if (LevelRows.Num() <= Index)
+		{
+			LevelRows.SetNum(Index + 1);
+		}
+		LevelRows[Index] = Rect;
+	}
+}
+
+void ARainPaintGame::SetLevelListOpen(bool bOpen)
+{
+	bLevelListOpen = bOpen && Phase != EPaintPhase::Painting;
+	if (!bLevelListOpen)
+	{
+		LevelRows.Reset();
+	}
+}
+
+bool ARainPaintGame::ClickLevelList(FVector2D Screen)
+{
+	for (int32 i = 0; bLevelListOpen && i < LevelRows.Num() && i < Levels.Num(); ++i)
+	{
+		if (LevelRows[i].bIsValid && LevelRows[i].IsInside(Screen))
+		{
+			StartLevel(i);
+			SetLevelListOpen(false);
+			return true;
+		}
+	}
+	return false;
 }
 
 void ARainPaintGame::StartLevel(int32 Index)
@@ -1516,6 +1552,36 @@ void ARainPaintGame::HandleInput(float DeltaSeconds)
 	float MX = 0.0f, MY = 0.0f;
 	const bool bHaveMouse = PC->GetMousePosition(MX, MY);
 	const FVector2D Mouse(MX, MY);
+
+	// The level select, before a round: the panel's level button or L opens the list, a row picks its level, a click
+	// anywhere else (or L again) closes it; the number keys pick a level directly.
+	if (Phase != EPaintPhase::Painting)
+	{
+		static const FKey NumberKeys[] = { EKeys::One, EKeys::Two, EKeys::Three, EKeys::Four, EKeys::Five, EKeys::Six, EKeys::Seven, EKeys::Eight, EKeys::Nine };
+		for (int32 i = 0; i < UE_ARRAY_COUNT(NumberKeys) && i < Levels.Num(); ++i)
+		{
+			if (Pressed(NumberKeys[i]))
+			{
+				StartLevel(i);
+				SetLevelListOpen(false);
+			}
+		}
+		const bool bClick = bHaveMouse && Pressed(EKeys::LeftMouseButton);
+		if (Pressed(EKeys::L) || (bClick && LevelButton.bIsValid && LevelButton.IsInside(Mouse)))
+		{
+			SetLevelListOpen(!bLevelListOpen);
+			return;
+		}
+		if (bClick && bLevelListOpen)
+		{
+			// A click while the list is open only picks a row or closes the list.
+			if (!ClickLevelList(Mouse))
+			{
+				SetLevelListOpen(false);
+			}
+			return;
+		}
+	}
 
 	// The panel's sliders: grab one, drag along it; the pool's size is applied when it is let go (a new pool).
 	if (bHaveMouse && PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))

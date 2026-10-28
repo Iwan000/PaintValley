@@ -32,7 +32,9 @@ Paint Valley is the redesign of the Rain Shield course project. The structure is
 | F or the panel's button (before a round, rain only) | Drops in the air: paint look or film look. |
 | Panel slider "drops" / "paint balls" (before a round) | The pool's size (rain 10k–400k, balls 100–5,000, on a log scale); the pool is rebuilt when you let go. |
 | Panel slider "drop opacity" (any time, rain only) | How opaque the drops in the air are: 0–200 % of their own opacity. |
-| Q / E, mouse wheel, PgUp / PgDn | Turn the view, zoom, change level. |
+| L or the panel's level button (before a round) | Opens the level list (number, name, system, par); a click on a row plays that level, a click elsewhere closes it. |
+| 1–8, PgUp / PgDn | Pick a level directly; step through the levels. |
+| Q / E, mouse wheel | Turn the view, zoom. |
 
 ## Rules (as the user set them)
 
