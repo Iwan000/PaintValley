@@ -35,7 +35,7 @@
 
 static TAutoConsoleVariable<int32> CVarPaintRainCount(
 	TEXT("rain.paint.Count"),
-	200000,
+	100000,
 	TEXT("Drops in the paint rain's pool (Paint Valley, System 1), spawned once per level. The paint each drop carries is the level's budget over the pool, so the count changes the cost, not the difficulty."),
 	ECVF_Default);
 
@@ -47,7 +47,7 @@ static TAutoConsoleVariable<float> CVarPaintCloudWait(
 
 static TAutoConsoleVariable<int32> CVarPaintBallCount(
 	TEXT("rain.paint.Balls"),
-	1500,
+	3500,
 	TEXT("Paint balls in System 2's pool (CPU meshes), spawned once per level."),
 	ECVF_Default);
 
@@ -421,6 +421,33 @@ namespace
 		Cell(Pin, -4, 0, 0, -4, 4, 1, K, Teal);
 		Cell(Pin, 1, -4, 2, 3, -4, 2, K, Teal);
 		Levels.Add(Pin);
+		// Stairs (rain): four steps rising to the plate that floats over the top two: straight-down rain misses them.
+		FPaintLevel Stairs = Level(TEXT("Stairs"), 45.0f, false);
+		for (int32 k = 0; k < 4; ++k)
+		{
+			Cell(Stairs, -2 + k, -1, k, 1, 1, k, T, Cream);
+		}
+		Cell(Stairs, 0, -2, 6, 2, 2, 6, K, Teal);
+		Levels.Add(Stairs);
+		// Table (paint balls, a bank shot): a thin slab under a floating table top that overhangs it by 30 cm, 30 cm
+		// above it. Its low sides take paint straight on (about 40 % of it); for its top, a ball fired straight in
+		// must skim under the edge, while one fired at the ground just outside bounces once and skips in under the
+		// table (or glances off its underside down onto the slab). A thicker slab spoils it: the bounced balls burst
+		// on its side before they reach the top (measured: 39 % against 75 % in 10 s). Fired straight in, a ball must skim under the edge (only shallow, narrow lines reach the slab's
+		// top); fired at the ground just outside, it bounces once and skips in under the table, or glances off its
+		// underside down onto the slab.
+		FPaintLevel Table = Level(TEXT("Table"), 50.0f, true);
+		auto Slab = [&Table](const FVector& Min, const FVector& Max, EPaintBoxKind Kind, int32 Pal)
+		{
+			FPaintBox& B = Table.Boxes.AddDefaulted_GetRef();
+			B.Min = Min;
+			B.Max = Max;
+			B.Kind = Kind;
+			B.Palette = Pal;
+		};
+		Slab(FVector(-45, -45, 0), FVector(45, 45, 15), T, Cream);
+		Slab(FVector(-75, -75, 45), FVector(75, 75, 60), K, Teal);
+		Levels.Add(Table);
 		Levels.Add(Keep);
 		return Levels;
 	}

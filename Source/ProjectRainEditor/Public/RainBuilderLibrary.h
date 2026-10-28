@@ -47,13 +47,13 @@ public:
 	 *  steered by User.RainGameDir, collided with the level's boxes, recycled except where the target takes them, the
 	 *  target's hits read back with Export Particle Data) and M_PaintDrop. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
-	static FString BuildPaintRainAssets(int32 RainCount = 200000);
+	static FString BuildPaintRainAssets(int32 RainCount = 100000);
 
 	/** Builds the paint game's System 2: NS_PaintBalls (a pool of BallCount CPU paint balls by default,
 	 *  User.RainGameCount; launched along User.RainGameDir, bounced off the level's boxes, burst on the target and read
 	 *  back with Export Particle Data) and M_PaintBlob. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
-	static FString BuildPaintBallAssets(int32 BallCount = 1500);
+	static FString BuildPaintBallAssets(int32 BallCount = 3500);
 
 	/** Diagnostics: lists every script of a system with its usage, sim target and rapid-iteration parameters. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")

@@ -3,8 +3,8 @@
 The `paint` branch turns the game into **Paint Valley**: a structure of blocks in Monument Valley's style, painted by a rain that you steer. The submitted Rain Shield is the tag `v1.0-rainshield`; its section below is unchanged.
 
 - **Goal.** Cover 90 % of the cream target blocks. Blockers and the ground repel paint. Paint spreads as puddles that join; small drops grow the paint they land on and are used up only there.
-- **System 1:** 200,000 GPU drops (`NS_PaintRain`).
-- **System 2:** 1,500 elastic CPU paint balls (`NS_PaintBalls`). They bounce off the level, burst on the target, and collide with each other through a neighbour query.
+- **System 1:** 100,000 GPU drops (`NS_PaintRain`).
+- **System 2:** 3,500 elastic CPU paint balls (`NS_PaintBalls`). They bounce off the level, burst on the target, and collide with each other through a neighbour query.
 - **Switching.** `Tab` switches between the systems before a round; the idle one is paused.
 - **Play:** open `/Game/RainMagic/Maps/L_PaintValley` and press Play. Drag the ball at the bottom right to turn the direction; hold it still to stop the rain and the clock; Enter starts.
 

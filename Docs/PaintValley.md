@@ -10,8 +10,8 @@ Paint Valley is the redesign of the Rain Shield course project. The structure is
   import unreal
   L = unreal.RainBuilderLibrary
   L.build_paint_assets()              # MPC_Paint, M_PaintSurface, M_PaintBackdrop, M_PaintBall (the trackball)
-  L.build_paint_rain_assets(200000)   # System 1: NS_PaintRain + M_PaintDrop
-  L.build_paint_ball_assets(1500)     # System 2: NS_PaintBalls + M_PaintBlob
+  L.build_paint_rain_assets(100000)   # System 1: NS_PaintRain + M_PaintDrop
+  L.build_paint_ball_assets(3500)     # System 2: NS_PaintBalls + M_PaintBlob
   ```
 - Standalone measurement (one run, one line in `Saved/Sweeps/PaintMeasure.txt`):
   ```sh
@@ -60,7 +60,7 @@ Paint Valley is the redesign of the Rain Shield course project. The structure is
 
 - **Asset:** `NS_PaintRain`, one GPU emitter.
 - **HLSL:** `Niagara/HLSL/PaintRainSpawn.hlsl` and `PaintRainUpdate.hlsl`.
-- **Count:** 200,000 (`rain.paint.Count`).
+- **Count:** 100,000 (`rain.paint.Count`).
 
 Per-drop rules:
 1. **Steer.** The velocity relaxes towards the player's current direction (time constant 0.25 s), so the stream bends like a hose's when the direction turns.
@@ -83,7 +83,7 @@ Per-drop rules:
 
 - **Asset:** `NS_PaintBalls`, one CPU (VectorVM) emitter drawn as engine spheres.
 - **HLSL:** `PaintBallSpawn.hlsl`, `PaintBallUpdate.hlsl` and `PaintBallNeighbors.hlsl`.
-- **Count:** 1,500 (`rain.paint.Balls`).
+- **Count:** 3,500 (`rain.paint.Balls`).
 - The CPU HLSL is branch-free (0/1 factors and `lerp`), because the VectorVM cannot flatten branches that declare variables.
 
 **State machine:** cloud → flying → resting → burst → used.
@@ -116,18 +116,20 @@ Per-drop rules:
 | 2 | Courtyard | rain | A block with a small tower inside walls open on one side. The walls shade the lower faces. |
 | 3 | Nook | balls | The target sits in a nook roofed and walled on three sides: skip the balls over the ground into it. |
 | 4 | Pinball | balls | Four target pillars of different heights between floating bumpers. |
-| 5 | Peach Keep | rain | The castle showcase from the art pass (not a game level). |
+| 5 | Stairs | rain | Four steps rising to a plate that floats over the top two: straight-down rain misses them. |
+| 6 | Table | balls | A bank shot: a thin slab (15 cm) under a floating table top that overhangs it by 30 cm, 30 cm above it. Its low sides (about 40 % of the target) take paint straight on. For its top, a ball fired straight in must skim under the edge; fired at the ground just outside, it bounces once and skips in. In 10 s with `BallWait 8`: 75–77 % aimed at the ground (tilt 55°), 42–43 % skimming straight in (tilt 80°). |
+| 7 | Peach Keep | rain | The castle showcase from the art pass (not a game level). |
 
 ## Console variables
 
 | Cvar | Default | Effect |
 |---|---|---|
-| `rain.paint.Count` | 200000 | System 1 pool (respawns the rain) |
+| `rain.paint.Count` | 100000 | System 1 pool (respawns the rain) |
 | `rain.paint.CloudWait` | 8 | Longest wait of a recycled drop in the cloud (s): sets how many drops are in the air |
 | `rain.paint.Budget` | 2.0 | Paint in the small drops' pool, as a multiple of what the goal needs |
 | `rain.paint.BigSeed` | 60 | Paint a big drop seeds, in small drops' worth |
 | `rain.paint.BigShare` | 0.03 | Share of big drops (refills the pool) |
-| `rain.paint.Balls` | 1500 | System 2 pool |
+| `rain.paint.Balls` | 3500 | System 2 pool |
 | `rain.paint.BallWait` | 30 | Longest wait of a paint ball in the cloud (s) |
 | `rain.paint.BallBudget` | 1.5 | Paint in System 2's pool, as a multiple of what the goal needs |
 | `rain.paint.PauseIdle` | 1 | 0 keeps the idle system simulating (to measure what pausing saves) |
@@ -148,8 +150,8 @@ Measured on 2026-10-28 on an Apple M2 Pro with UE 5.7 (Metal), in a standalone 1
 |---:|---:|---:|---:|
 | 25,000 | 8.38 | 1.25 | 7.71 |
 | 50,000 | 8.36 | 1.27 | 7.73 |
-| 100,000 | 8.33 | 1.33 | 7.76 |
-| 200,000 (default) | 8.79 | 0.97 | 8.27 |
+| 100,000 (default) | 8.33 | 1.33 | 7.76 |
+| 200,000 | 8.79 | 0.97 | 8.27 |
 | 400,000 | 14.68 | 1.11 | 14.15 |
 | 800,000 | 26.36 | 1.56 | 25.86 |
 
@@ -160,6 +162,7 @@ Measured on 2026-10-28 on an Apple M2 Pro with UE 5.7 (Metal), in a standalone 1
 | 500 | 8.35 | 2.48 | 7.80 |
 | 1,000 | 8.36 | 2.88 | 7.82 |
 | 2,000 | 8.36 | 3.45 | 7.85 |
+| 3,500 (default) | 8.35 | 3.58 | 7.75 |
 | 4,000 | 8.36 | 4.92 | 7.89 |
 | 8,000 | 18.95 \* | 8.21 | — |
 
