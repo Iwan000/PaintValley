@@ -11,11 +11,12 @@ Paint Valley is the redesign of the Rain Shield course project. The structure is
   L = unreal.RainBuilderLibrary
   L.build_paint_assets()              # MPC_Paint, M_PaintSurface, M_PaintBackdrop, M_PaintBall (the trackball)
   L.build_paint_rain_assets(100000)   # System 1: NS_PaintRain + M_PaintDrop
-  L.build_paint_ball_assets(3500)     # System 2: NS_PaintBalls + M_PaintBlob
+  L.build_paint_ball_assets(3500)     # System 2: NS_PaintBalls (CPU), NS_PaintBallsGPU (the port) + M_PaintBlob
   ```
 - Standalone measurement (one run, one line in `Saved/Sweeps/PaintMeasure.txt`):
   ```sh
-  Scripts/paint_sweep.sh rain | balls | pause
+  Scripts/paint_sweep.sh rain | balls | ballsgpu | pause
+  python3 Scripts/paint_perf.py       # -> Docs/Perf/paint_sweep.csv and the report's figure
   ```
 
 ## Controls
@@ -130,6 +131,7 @@ Per-drop rules:
 | `rain.paint.BigSeed` | 60 | Paint a big drop seeds, in small drops' worth |
 | `rain.paint.BigShare` | 0.03 | Share of big drops (refills the pool) |
 | `rain.paint.Balls` | 3500 | System 2 pool |
+| `rain.paint.BallsGPU` | 0 | 1 runs System 2 on the GPU (`NS_PaintBallsGPU`, the same HLSL): the CPU → GPU port measured in the report. Rebuilds the pool |
 | `rain.paint.BallWait` | 30 | Longest wait of a paint ball in the cloud (s) |
 | `rain.paint.BallBudget` | 1.5 | Paint in System 2's pool, as a multiple of what the goal needs |
 | `rain.paint.PauseIdle` | 1 | 0 keeps the idle system simulating (to measure what pausing saves) |
@@ -138,39 +140,25 @@ Per-drop rules:
 Command-line options:
 - `-PaintLevel=N` starts on level N.
 - `-PaintBalls` starts in System 2.
-- `-PaintMeasure` measures and quits (`-PaintMeasureSettle=S` sets the settle time).
+- `-PaintBallsGPU` starts with System 2 on the GPU (`rain.paint.BallsGPU 1`).
+- `-PaintMeasure` measures and quits (`-PaintMeasureSettle=S` sets the settle time; `-PaintMeasureNoNiagara` leaves out the per-system Niagara timers).
+- `-PaintDemo` plays the scripted ~88 s tour of the video (`-PaintDemoQuit` quits at the end; `Scripts/paint_demo.sh` records it).
 
 ## Performance
 
-Measured on 2026-10-28 on an Apple M2 Pro with UE 5.7 (Metal), in a standalone 1920×1080 window at 100 % resolution with FXAA. Each run is one line of `Scripts/paint_sweep.sh`: the round starts, settles for 6–8 s, then `stat unit`'s raw times are averaged over 5 s. The raw lines are in `Saved/Sweeps/PaintMeasure.txt`. Frames are capped at the display's 120 Hz (8.33 ms).
+The measurements, the method and the analysis are in **`Docs/PaintValleyReport.pdf`** (2 pages). The data are in `Docs/Perf/paint_sweep.csv`, and the profiler captures are `Docs/Perf/paint_*`. Headline numbers (Apple M2 Pro, standalone 1920×1080, FXAA; frames are capped at the display's 120 Hz, 8.33 ms):
 
-**System 1, rain (level Blocks, raining and painting).** The game thread holds near 1 ms, because the GPU does the simulation. Up to 200k drops the frame stays at the 120 Hz cap. Beyond that the GPU sets the pace, at about +2.9 ms per 100k drops.
+- **System 1, rain.** The GPU sets the pace: each 100k drops cost about 2.9 ms of GPU, above about 2.5 ms for the scene.
+  - The 16.6 ms budget breaks at about 460k drops.
+  - Niagara's CPU time stays near 0.1 ms all the way to 1.6M drops.
+- **System 2, paint balls on the CPU.** About 0.72 µs of Niagara CPU time per ball.
+  - The 4 ms Niagara budget breaks at about 5.4k balls; the default 3,500 uses 2.6 ms.
+- **The GPU port** (`rain.paint.BallsGPU 1`).
+  - Niagara CPU time drops to about 0.05 ms at any count.
+  - At 16k balls the frame drops from 15.2 to 9.0 ms. The port breaks the frame budget at about 39k balls.
+- **Pausing the idle system** makes no measurable difference: the idle particles wait hidden in the cloud.
 
-| Drops | Frame (ms) | Game thread (ms) | GPU (ms) |
-|---:|---:|---:|---:|
-| 25,000 | 8.38 | 1.25 | 7.71 |
-| 50,000 | 8.36 | 1.27 | 7.73 |
-| 100,000 (default) | 8.33 | 1.33 | 7.76 |
-| 200,000 | 8.79 | 0.97 | 8.27 |
-| 400,000 | 14.68 | 1.11 | 14.15 |
-| 800,000 | 26.36 | 1.56 | 25.86 |
-
-**System 2, paint balls (level Nook, `rain.paint.BallWait 8` so that many balls fly).** The CPU simulation (motion, 32-box collision, the neighbour query) costs about 0.8 ms per 1,000 balls on the game thread, on top of about 1 ms for the game itself. The 4 ms Niagara budget is reached at about 4,000 balls.
-
-| Balls | Frame (ms) | Game thread (ms) | GPU (ms) |
-|---:|---:|---:|---:|
-| 500 | 8.35 | 2.48 | 7.80 |
-| 1,000 | 8.36 | 2.88 | 7.82 |
-| 2,000 | 8.36 | 3.45 | 7.85 |
-| 3,500 (default) | 8.35 | 3.58 | 7.75 |
-| 4,000 | 8.36 | 4.92 | 7.89 |
-| 8,000 | 18.95 \* | 8.21 | — |
-
-\* This run paced at 60 Hz, and `stat unit` reported no GPU time (this happens in some standalone runs on this Mac). Its game-thread time is still valid.
-
-**Pausing the idle system** (`Scripts/paint_sweep.sh pause`: System 2 at 2,000 balls, with 800,000 rain drops idle). Paused: game thread 3.59 ms, GPU 7.66 ms. Simulating: game thread 3.50 ms, GPU 7.39 ms. **There is no measurable difference.** The idle system is hidden either way, and its drops wait in the cloud as zero-size sprites, so it costs almost nothing. (In the Rain Shield version, where the idle system kept falling, pausing saved 4.3 ms; see `Docs/PerformanceReport.pdf`.)
-
-Earlier timings taken in PIE are not comparable. After hours of rebuilding assets, the editor itself fell to about 5 fps; a freshly started editor ran PIE at 80–90 fps.
+**Numbers taken before 2026-10-28 11:20 are wrong.** Changing a pool at runtime used to keep the old pool alive (500 balls requested, 4,000 live). `Activate(true)` re-fired the spawn burst on top of the old particles; `ReinitializeSystem()` now replaces the instance. The sweeps now set the pools at launch (`-PaintCount=`, `-PaintBallCount=`) and log the live count.
 
 ## Code map
 
@@ -190,4 +178,5 @@ Earlier timings taken in PIE are not comparable. After hours of rebuilding asset
   - The best rain density (`rain.paint.CloudWait`) is still open.
 - **Trackball not tested with a real mouse.** The globe drag was tested through script calls only. Posting real mouse events needs a macOS Accessibility permission this setup does not have.
 - **Peach Keep (showcase only).** On the arch faces, the full-face mask doesn't line up with the arch's collision proxies, so drops there are not read back. The level also has 35 collision boxes, of which 32 are tested.
+- **The GPU port paints faster early on.** On Nook at 3,500 balls it painted 89 % in 13 s, against 55 % on the CPU (both reach about 92 % by 35 s). The same HLSL runs on both, and the cause is not isolated. One suspect is the `sin`-based launch hashes, whose precision differs between the VectorVM and the GPU.
 - **Debug-draw arrow.** The direction arrow in the level is a debug draw, so it is missing in a Shipping build.

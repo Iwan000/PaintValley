@@ -1635,96 +1635,103 @@ FString URainBuilderLibrary::BuildPaintBallAssets(int32 BallCount)
 	UMaterial* Material = BuildPaintBlobMaterial(Report);
 	const FPaintBallConfig Config;
 	const FString ModPath = RainRoot / TEXT("Niagara/Modules");
-	UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_PaintBallSpawn"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallSpawn.hlsl")), Config),
-		TEXT("Paint Valley: paint balls waiting in the cloud"), ParticleModuleMask);
-	UNiagaraScript* Update = CreateHlslModule(ModPath, TEXT("NM_PaintBallUpdate"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallUpdate.hlsl")), Config),
-		TEXT("Paint Valley: paint balls fly, bounce and burst on the target"), ParticleModuleMask);
-	UNiagaraScript* Neighbors = CreateReaderModule(ModPath, TEXT("NM_PaintBallNeighbors"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallNeighbors.hlsl")), Config),
-		TEXT("Paint Valley: paint balls find their nearest balls and collide with them"), ParticleModuleMask, Report);
-	SaveAsset(Spawn);
-	SaveAsset(Update);
-	if (Neighbors)
-	{
-		SaveAsset(Neighbors);
-	}
 	const FGameExportInputs Inputs = FindExportInputs(Report);
-
-	UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), TEXT("NS_PaintBalls"));
-	AddGameUserParameters(System, BallCount);
+	bool bOk = true;
+	// The same HLSL for both targets: NS_PaintBalls (CPU) is System 2; NS_PaintBallsGPU is the CPU -> GPU port
+	// measured in the report (rain.paint.BallsGPU 1).
+	for (const bool bGpu : { false, true })
 	{
-		auto Add = [System](FNiagaraVariable Var) { Var.SetName(*(TEXT("User.") + Var.GetName().ToString())); AddUserParameter(System, Var); };
-		auto Float = [&Add](const TCHAR* Name, float V) { FNiagaraVariable Var(FNiagaraTypeDefinition::GetFloatDef(), Name); Var.SetValue(V); Add(Var); };
-		Float(TEXT("RainBallLeft"), 1.0f);
-		Float(TEXT("RainBallWait"), 6.0f);
-		Float(TEXT("RainBallEpoch"), 0.0f);
-		Float(TEXT("RainFreeze"), 0.0f);
-		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		const TCHAR* Suffix = bGpu ? TEXT("GPU") : TEXT("");
+		UNiagaraScript* Spawn = CreateHlslModule(ModPath, FString(TEXT("NM_PaintBallSpawn")) + Suffix, FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallSpawn.hlsl")), Config),
+			TEXT("Paint Valley: paint balls waiting in the cloud"), ParticleModuleMask);
+		UNiagaraScript* Update = CreateHlslModule(ModPath, FString(TEXT("NM_PaintBallUpdate")) + Suffix, FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallUpdate.hlsl")), Config),
+			TEXT("Paint Valley: paint balls fly, bounce and burst on the target"), ParticleModuleMask);
+		UNiagaraScript* Neighbors = CreateReaderModule(ModPath, FString(TEXT("NM_PaintBallNeighbors")) + Suffix, FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallNeighbors.hlsl")), Config),
+			TEXT("Paint Valley: paint balls find their nearest balls and collide with them"), ParticleModuleMask, Report);
+		SaveAsset(Spawn);
+		SaveAsset(Update);
+		if (Neighbors)
 		{
-			Float(*FString::Printf(TEXT("RainBox%dFull"), i), 0.0f);
+			SaveAsset(Neighbors);
 		}
-		FNiagaraVariable Ink(FNiagaraTypeDefinition::GetColorDef(), TEXT("RainPaintInk"));
-		Ink.SetValue(FLinearColor(0.15f, 0.45f, 0.85f, 1.0f));
-		Add(Ink);
+
+		UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), bGpu ? TEXT("NS_PaintBallsGPU") : TEXT("NS_PaintBalls"));
+		AddGameUserParameters(System, BallCount);
+		{
+			auto Add = [System](FNiagaraVariable Var) { Var.SetName(*(TEXT("User.") + Var.GetName().ToString())); AddUserParameter(System, Var); };
+			auto Float = [&Add](const TCHAR* Name, float V) { FNiagaraVariable Var(FNiagaraTypeDefinition::GetFloatDef(), Name); Var.SetValue(V); Add(Var); };
+			Float(TEXT("RainBallLeft"), 1.0f);
+			Float(TEXT("RainBallWait"), 6.0f);
+			Float(TEXT("RainBallEpoch"), 0.0f);
+			Float(TEXT("RainFreeze"), 0.0f);
+			for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+			{
+				Float(*FString::Printf(TEXT("RainBox%dFull"), i), 0.0f);
+			}
+			FNiagaraVariable Ink(FNiagaraTypeDefinition::GetColorDef(), TEXT("RainPaintInk"));
+			Ink.SetValue(FLinearColor(0.15f, 0.45f, 0.85f, 1.0f));
+			Add(Ink);
+		}
+
+		UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("PaintBalls"), false);
+		FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+		D->SimTarget = bGpu ? ENiagaraSimTarget::GPUComputeSim : ENiagaraSimTarget::CPUSim;
+		D->bLocalSpace = false;
+		D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+		D->FixedBounds = FBox(FVector(-5000.0), FVector(5000.0));
+		UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+		SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+		UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+		const bool bCountLinked = LinkModuleInput(Burst, TEXT("Spawn Count"), FNiagaraTypeDefinition::GetIntDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetIntDef(), TEXT("User.RainGameCount")));
+		LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+
+		const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+		const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
+		TArray<FNiagaraVariable> Attributes = {
+			FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
+			FNiagaraVariable(V3, TEXT("Particles.Velocity")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
+			FNiagaraVariable(V3, TEXT("Particles.Scale")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetQuatDef(), TEXT("Particles.MeshOrientation")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetVec4Def(), TEXT("Particles.RainRand")),
+			FNiagaraVariable(F, TEXT("Particles.BallState")),
+			FNiagaraVariable(F, TEXT("Particles.BallTimer")),
+			FNiagaraVariable(F, TEXT("Particles.BallBounces")),
+			FNiagaraVariable(F, TEXT("Particles.BallSquash")),
+			FNiagaraVariable(F, TEXT("Particles.BallCycle")),
+			FNiagaraVariable(F, TEXT("Particles.BallEpoch")),
+			FNiagaraVariable(V3, TEXT("Particles.BallNormal")),
+			FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.BallNear")),
+			FNiagaraVariable(F, TEXT("Particles.PaintKind")),
+			FNiagaraVariable(GameHitParam),
+			FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")),
+		};
+		TArray<FString> Defaults;
+		Defaults.SetNum(Attributes.Num());
+		AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
+		AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+		if (Neighbors)
+		{
+			AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Neighbors);
+		}
+		// After the update: the balls that burst on the target this frame (contact point, box kind as size, velocity).
+		const FNiagaraVariableBase Velocity(Inputs.VelocityType, TEXT("Particles.Velocity"));
+		const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(F, TEXT("Particles.PaintKind")), &Velocity);
+
+		UNiagaraMeshRendererProperties* Meshes = NewObject<UNiagaraMeshRendererProperties>(Emitter, TEXT("BallMeshes"));
+		Meshes->Meshes.SetNum(1);
+		Meshes->Meshes[0].Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+		Meshes->bOverrideMaterials = true;
+		FNiagaraMeshMaterialOverride& Override = Meshes->OverrideMaterials.AddDefaulted_GetRef();
+		Override.ExplicitMat = Material;
+		Emitter->AddRenderer(Meshes, D->Version.VersionGuid);
+
+		FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
+		bOk &= CompileAndReport(System, Report);
+		SaveAsset(System);
+		Report += FString::Printf(TEXT("Emitter PaintBalls (%s): User.RainGameCount balls (%s), %d boxes, burst export %s\n"), bGpu ? TEXT("GPU") : TEXT("CPU"),
+			bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), RainShield::MaxBoxes, bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
 	}
-
-	UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("PaintBalls"), false);
-	FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
-	D->SimTarget = ENiagaraSimTarget::CPUSim;
-	D->bLocalSpace = false;
-	D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
-	D->FixedBounds = FBox(FVector(-5000.0), FVector(5000.0));
-	UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
-	SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
-	UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
-	const bool bCountLinked = LinkModuleInput(Burst, TEXT("Spawn Count"), FNiagaraTypeDefinition::GetIntDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetIntDef(), TEXT("User.RainGameCount")));
-	LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
-
-	const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
-	const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
-	TArray<FNiagaraVariable> Attributes = {
-		FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
-		FNiagaraVariable(V3, TEXT("Particles.Velocity")),
-		FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
-		FNiagaraVariable(V3, TEXT("Particles.Scale")),
-		FNiagaraVariable(FNiagaraTypeDefinition::GetQuatDef(), TEXT("Particles.MeshOrientation")),
-		FNiagaraVariable(FNiagaraTypeDefinition::GetVec4Def(), TEXT("Particles.RainRand")),
-		FNiagaraVariable(F, TEXT("Particles.BallState")),
-		FNiagaraVariable(F, TEXT("Particles.BallTimer")),
-		FNiagaraVariable(F, TEXT("Particles.BallBounces")),
-		FNiagaraVariable(F, TEXT("Particles.BallSquash")),
-		FNiagaraVariable(F, TEXT("Particles.BallCycle")),
-		FNiagaraVariable(F, TEXT("Particles.BallEpoch")),
-		FNiagaraVariable(V3, TEXT("Particles.BallNormal")),
-		FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.BallNear")),
-		FNiagaraVariable(F, TEXT("Particles.PaintKind")),
-		FNiagaraVariable(GameHitParam),
-		FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")),
-	};
-	TArray<FString> Defaults;
-	Defaults.SetNum(Attributes.Num());
-	AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
-	AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
-	AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
-	if (Neighbors)
-	{
-		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Neighbors);
-	}
-	// After the update: the balls that burst on the target this frame (contact point, box kind as size, velocity).
-	const FNiagaraVariableBase Velocity(Inputs.VelocityType, TEXT("Particles.Velocity"));
-	const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(F, TEXT("Particles.PaintKind")), &Velocity);
-
-	UNiagaraMeshRendererProperties* Meshes = NewObject<UNiagaraMeshRendererProperties>(Emitter, TEXT("BallMeshes"));
-	Meshes->Meshes.SetNum(1);
-	Meshes->Meshes[0].Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	Meshes->bOverrideMaterials = true;
-	FNiagaraMeshMaterialOverride& Override = Meshes->OverrideMaterials.AddDefaulted_GetRef();
-	Override.ExplicitMat = Material;
-	Emitter->AddRenderer(Meshes, D->Version.VersionGuid);
-
-	FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
-	const bool bOk = CompileAndReport(System, Report);
-	SaveAsset(System);
-	Report += FString::Printf(TEXT("Emitter PaintBalls (CPU): User.RainGameCount balls (%s), %d boxes, burst export %s\n"),
-		bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), RainShield::MaxBoxes, bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
 	return FString::Printf(TEXT("%s\n%s"), bOk && !Report.Contains(TEXT("ERROR")) ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
 }

@@ -12,6 +12,7 @@
 
 class UNiagaraComponent;
 class UNiagaraSystem;
+class FParticlePerfStatsListener_GatherAll;
 
 class ACameraActor;
 class UMaterialInstanceDynamic;
@@ -127,6 +128,8 @@ public:
 	 *  paused). */
 	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UNiagaraComponent> PaintBalls;
 	UPROPERTY(EditAnywhere, Category = "Paint") TSoftObjectPtr<UNiagaraSystem> PaintBallSystem;
+	/** The paint balls on the GPU (rain.paint.BallsGPU 1): the same HLSL, the CPU -> GPU port measured in the report. */
+	UPROPERTY(EditAnywhere, Category = "Paint") TSoftObjectPtr<UNiagaraSystem> PaintBallSystemGPU;
 	/** The pool's tuning below follows the cvars rain.paint.BigShare, rain.paint.Budget and rain.paint.BigSeed.
 	 *  The pool (rain.paint.Count drops, spawned once): this share are big drops, the rest small ones. Big drops seed
 	 *  puddles and are never used up; they fall in proportion to the small drops still left. A small drop is used up
@@ -202,6 +205,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPaintBallsLeft() const { return FMath::Max(PaintBallPool - PaintBallsUsed, 0); }
 	/** Paint balls alive in the CPU emitter (the whole pool: none is ever killed). */
 	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetLivePaintBallCount() const;
+	/** A scripted ~88 s tour for the video (-PaintDemo on the command line; -PaintDemoQuit quits at the end). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void StartDemo();
+	/** The demo's caption (empty outside the demo). */
+	UFUNCTION(BlueprintPure, Category = "Paint") FString GetDemoCaption() const { return DemoCaption; }
+	/** True when System 2 runs on the GPU (rain.paint.BallsGPU 1). */
+	UFUNCTION(BlueprintPure, Category = "Paint") bool GetPaintBallsOnGpu() const { return bPaintBallsGpu; }
 	/** Diagnostics: Max paint balls (spread over the pool) with their state, cycle, seeds and position. */
 	UFUNCTION(BlueprintCallable, Category = "Paint") FString DebugPaintBalls(int32 Max = 20) const;
 	UFUNCTION(BlueprintPure, Category = "Paint") bool GetFilmDrops() const { return bFilmDrops; }
@@ -238,11 +247,29 @@ private:
 	void BallDragTo(const FVector2D& Screen);
 	void HandleInput(float DeltaSeconds);
 
-	// -PaintMeasure: settle 4 s, then average stat unit's raw times over 5 s, log them and quit.
+	// -PaintMeasure: settle 4 s, then average stat unit's raw times and the played system's Niagara times over 5 s,
+	// log them and quit.
 	void TickMeasure(float DeltaSeconds);
 	float MeasureClock = -1.0f;
 	int32 MeasureFrames = 0;
 	double MeasureFrameMs = 0.0, MeasureGameMs = 0.0, MeasureRenderMs = 0.0, MeasureGpuMs = 0.0;
+	TSharedPtr<FParticlePerfStatsListener_GatherAll, ESPMode::ThreadSafe> MeasureListener;
+
+	// Demo (-PaintDemo): timed steps, a caption on the HUD, the direction turning slowly.
+	struct FDemoStep
+	{
+		float At = 0.0f;
+		TFunction<void()> Do;
+	};
+	TArray<FDemoStep> DemoSteps;
+	int32 DemoNext = 0;
+	float DemoClock = -1.0f;
+	float PendingDemoDelay = -1.0f;
+	bool bQuitAfterDemo = false;
+	/** Degrees per second the demo turns the rain's azimuth. */
+	float DemoSpin = 0.0f;
+	FString DemoCaption;
+	void TickDemo(float DeltaSeconds);
 
 	/** r.AntiAliasingMethod before the game set FXAA (restored at EndPlay: the film scene keeps its own). */
 	int32 PreviousAntiAliasing = -1;
@@ -257,6 +284,8 @@ private:
 	/** rain.paint.PauseIdle as last applied. */
 	bool PausedIdle = true;
 	bool bPaintBallMode = false;
+	/** rain.paint.BallsGPU as last applied. */
+	bool bPaintBallsGpu = false;
 	// System 2's pool: balls at the start, used up; the paint each one carries (cm^2); its round (as Epoch).
 	int32 PaintBallCount = 0;
 	int32 PaintBallPool = 0;

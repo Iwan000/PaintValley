@@ -9,6 +9,7 @@
 #include "NiagaraSystemInstance.h"
 #include "NiagaraSystemInstanceController.h"
 #include "NiagaraDataSetAccessor.h"
+#include "Particles/ParticlePerfStatsManager.h"
 
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -49,6 +50,12 @@ static TAutoConsoleVariable<int32> CVarPaintBallCount(
 	TEXT("rain.paint.Balls"),
 	3500,
 	TEXT("Paint balls in System 2's pool (CPU meshes), spawned once per level."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarPaintBallsGPU(
+	TEXT("rain.paint.BallsGPU"),
+	0,
+	TEXT("0 simulates System 2's paint balls on the CPU (NS_PaintBalls), 1 on the GPU (NS_PaintBallsGPU, the same HLSL): the CPU -> GPU port. Rebuilds the pool."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarPaintBallWait(
@@ -470,6 +477,7 @@ ARainPaintGame::ARainPaintGame()
 	PaintBalls->SetupAttachment(RootComponent);
 	PaintBalls->bAutoActivate = false;
 	PaintBallSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_PaintBalls.NS_PaintBalls")));
+	PaintBallSystemGPU = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_PaintBallsGPU.NS_PaintBallsGPU")));
 
 	Levels = DefaultLevels();
 }
@@ -603,6 +611,20 @@ void ARainPaintGame::BeginPlay()
 		// The panel at the top left (APaintHUD reads this actor).
 		PC->ClientSetHUD(APaintHUD::StaticClass());
 	}
+	// -PaintCount=N, -PaintBallCount=N: the pools from the start (measurements), so each system spawns once.
+	int32 StartCount = 0;
+	if (FParse::Value(FCommandLine::Get(), TEXT("PaintCount="), StartCount))
+	{
+		CVarPaintRainCount->Set(StartCount);
+	}
+	if (FParse::Value(FCommandLine::Get(), TEXT("PaintBallCount="), StartCount))
+	{
+		CVarPaintBallCount->Set(StartCount);
+	}
+	if (FParse::Param(FCommandLine::Get(), TEXT("PaintBallsGPU")))
+	{
+		CVarPaintBallsGPU->Set(1);
+	}
 	SetupRain();
 	SetupPaintBalls();
 	// -PaintLevel=N starts on level N (measurements, demos).
@@ -613,6 +635,11 @@ void ARainPaintGame::BeginPlay()
 	BallSpin = FQuat::FindBetweenNormals(FVector(0.0, 0.0, -1.0), BallSpinDir);
 	PlaceBall();
 
+	if (FParse::Param(FCommandLine::Get(), TEXT("PaintDemo")))
+	{
+		bQuitAfterDemo = FParse::Param(FCommandLine::Get(), TEXT("PaintDemoQuit"));
+		PendingDemoDelay = 3.0f;
+	}
 	if (FParse::Param(FCommandLine::Get(), TEXT("PaintMeasure")) && GEngine)
 	{
 		// Uncapped, full resolution (the desktop default follows the display: 72.9% on a Retina Mac).
@@ -640,7 +667,9 @@ void ARainPaintGame::SetupRain()
 	Rain->SetVariableObject(TEXT("RainHitHandler"), this);
 	Rain->SetVariableInt(TEXT("RainGameCount"), RainCount);
 	UploadRain();
-	Rain->Activate(true);
+	// A fresh instance: the burst fires once with the new pool (Activate(true) resets the instance, and the burst
+	// would add a full new pool to the old drops).
+	Rain->ReinitializeSystem();
 	if (Levels.IsValidIndex(LevelIndex))
 	{
 		ResetRound();
@@ -651,10 +680,12 @@ void ARainPaintGame::SetupRain()
 
 void ARainPaintGame::SetupPaintBalls()
 {
-	UNiagaraSystem* System = PaintBallSystem.LoadSynchronous();
+	bPaintBallsGpu = CVarPaintBallsGPU.GetValueOnGameThread() != 0;
+	UNiagaraSystem* System = (bPaintBallsGpu ? PaintBallSystemGPU : PaintBallSystem).LoadSynchronous();
 	if (!System)
 	{
-		UE_LOG(LogTemp, Error, TEXT("RainPaintGame: NS_PaintBalls missing (run unreal.RainBuilderLibrary.build_paint_ball_assets())"));
+		UE_LOG(LogTemp, Error, TEXT("RainPaintGame: %s missing (run unreal.RainBuilderLibrary.build_paint_ball_assets())"),
+			bPaintBallsGpu ? TEXT("NS_PaintBallsGPU") : TEXT("NS_PaintBalls"));
 		return;
 	}
 	PaintBallCount = FMath::Max(CVarPaintBallCount.GetValueOnGameThread(), 0);
@@ -663,7 +694,8 @@ void ARainPaintGame::SetupPaintBalls()
 	PaintBalls->SetVariableObject(TEXT("RainHitHandler"), this);
 	PaintBalls->SetVariableInt(TEXT("RainGameCount"), PaintBallCount);
 	UploadRain();
-	PaintBalls->Activate(true);
+	// A fresh instance, as for the rain (a reset would keep the old balls).
+	PaintBalls->ReinitializeSystem();
 	if (Surface.NumFaces() > 0)
 	{
 		UploadBoxes();
@@ -1054,6 +1086,12 @@ void ARainPaintGame::TickMeasure(float DeltaSeconds)
 	{
 		return;
 	}
+	if (MeasureFrames == 0 && !FParse::Param(FCommandLine::Get(), TEXT("PaintMeasureNoNiagara")))
+	{
+		// The played system's own Niagara times (game thread, render thread, GPU), as stat Niagara counts them.
+		MeasureListener = MakeShared<FParticlePerfStatsListener_GatherAll, ESPMode::ThreadSafe>(false, true, false);
+		FParticlePerfStatsManager::AddListener(MeasureListener);
+	}
 	if (MeasureFrames == 0 && FParse::Param(FCommandLine::Get(), TEXT("PaintProfileGPU")))
 	{
 		// One frame's GPU passes to the log.
@@ -1079,8 +1117,26 @@ void ARainPaintGame::TickMeasure(float DeltaSeconds)
 	if (MeasureClock >= Settle + 5.0f)
 	{
 		const double N = FMath::Max(MeasureFrames, 1);
-		const FString Line = FString::Printf(TEXT("PAINTMEASURE level=%d system=%d drops=%d balls=%d frames=%d frame_ms=%.2f game_ms=%.2f render_ms=%.2f gpu_ms=%.2f puddles=%d coverage=%.3f pool_left=%d balls_left=%d"),
-			LevelIndex, bPaintBallMode ? 2 : 1, RainCount, PaintBallCount, MeasureFrames, MeasureFrameMs / N, MeasureGameMs / N, MeasureRenderMs / N, MeasureGpuMs / N,
+		double NiagaraGt = 0.0, NiagaraRt = 0.0, NiagaraGpu = 0.0;
+		UNiagaraComponent* Played = bPaintBallMode ? PaintBalls : Rain;
+#if WITH_PER_SYSTEM_PARTICLE_PERF_STATS
+		if (FAccumulatedParticlePerfStats* Stats = MeasureListener && Played ? MeasureListener->GetStats(Played->GetAsset()) : nullptr)
+		{
+			// Per frame, in microseconds.
+			NiagaraGt = Stats->GetGameThreadStats().GetPerFrameAvg() / 1000.0;
+			NiagaraRt = Stats->GetRenderThreadStats(true).GetPerFrameAvg() / 1000.0;
+			NiagaraGpu = Stats->GetGPUStats(true).GetPerFrameAvgMicroseconds() / 1000.0;
+		}
+#endif
+		if (MeasureListener)
+		{
+			FParticlePerfStatsManager::RemoveListener(MeasureListener.Get());
+			MeasureListener.Reset();
+		}
+		const FString Line = FString::Printf(TEXT("PAINTMEASURE level=%d system=%d%s drops=%d balls=%d live=%d frames=%d frame_ms=%.2f game_ms=%.2f render_ms=%.2f gpu_ms=%.2f niagara_gt_ms=%.3f niagara_rt_ms=%.3f niagara_gpu_ms=%.3f puddles=%d coverage=%.3f pool_left=%d balls_left=%d"),
+			LevelIndex, bPaintBallMode ? 2 : 1, bPaintBallMode ? (bPaintBallsGpu ? TEXT("gpu") : TEXT("cpu")) : TEXT(""), RainCount, PaintBallCount,
+			bPaintBallMode ? GetLivePaintBallCount() : GetLiveParticleCount(), MeasureFrames,
+			MeasureFrameMs / N, MeasureGameMs / N, MeasureRenderMs / N, MeasureGpuMs / N, NiagaraGt, NiagaraRt, NiagaraGpu,
 			Surface.NumPuddles(), GetCoverage(), GetPoolLeft(), GetPaintBallsLeft());
 		UE_LOG(LogTemp, Display, TEXT("%s"), *Line);
 		FFileHelper::SaveStringToFile(Line + TEXT("\n"), *(FPaths::ProjectSavedDir() / TEXT("Sweeps/PaintMeasure.txt")), FFileHelper::EEncodingOptions::AutoDetect, &IFileManager::Get(), FILEWRITE_Append);
@@ -1094,6 +1150,11 @@ void ARainPaintGame::TickMeasure(float DeltaSeconds)
 
 void ARainPaintGame::EndPlay(const EEndPlayReason::Type Reason)
 {
+	if (MeasureListener)
+	{
+		FParticlePerfStatsManager::RemoveListener(MeasureListener.Get());
+		MeasureListener.Reset();
+	}
 	if (PreviousAntiAliasing >= 0)
 	{
 		if (IConsoleVariable* AA = IConsoleManager::Get().FindConsoleVariable(TEXT("r.AntiAliasingMethod")))
@@ -1342,11 +1403,21 @@ void ARainPaintGame::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 	HandleInput(DeltaSeconds);
 	TickMeasure(DeltaSeconds);
+	if (PendingDemoDelay > 0.0f)
+	{
+		PendingDemoDelay -= float(FApp::GetDeltaTime());
+		if (PendingDemoDelay <= 0.0f)
+		{
+			StartDemo();
+		}
+	}
+	TickDemo(DeltaSeconds);
 	if (Rain && FMath::Max(CVarPaintRainCount.GetValueOnGameThread(), 0) != RainCount)
 	{
 		SetupRain();
 	}
-	if (PaintBalls && PaintBalls->GetAsset() && FMath::Max(CVarPaintBallCount.GetValueOnGameThread(), 0) != PaintBallCount)
+	if (PaintBalls && PaintBalls->GetAsset() && (FMath::Max(CVarPaintBallCount.GetValueOnGameThread(), 0) != PaintBallCount
+		|| (CVarPaintBallsGPU.GetValueOnGameThread() != 0) != bPaintBallsGpu))
 	{
 		SetupPaintBalls();
 	}
@@ -1575,4 +1646,92 @@ FString ARainPaintGame::Describe() const
 		BoxesUsed, Surface.TargetAreaCm2(), int32(Phase), bOutOfRain ? 1 : 0, Clock, GetCoverage(), PoolSize, GetPoolLeft(), Consumed, GetBigActive(), BigSeeds,
 		PaintFromSmall, PaintFromBig, PaintPerDrop, MaxHitsPerFrame, FullExports, RainCount, GetLiveParticleCount(), Surface.NumPuddles(), Surface.NumGrowing(), Freeze,
 		Direction().X, Direction().Y, Direction().Z, bPaintBallMode ? 2 : 1, PaintBallPool, GetPaintBallsLeft(), GetLivePaintBallCount());
+}
+
+void ARainPaintGame::StartDemo()
+{
+	auto Exec = [this](const TCHAR* Command) { GEngine->Exec(GetWorld(), Command); };
+	auto Say = [this](const TCHAR* Text) { return [this, Text]() { DemoCaption = Text; }; };
+	// A level with one system, aimed, the round running.
+	auto Play = [this](int32 Level, bool bBalls, float Azimuth, float Tilt, float Spin)
+	{
+		return [this, Level, bBalls, Azimuth, Tilt, Spin]()
+		{
+			StartLevel(Level);
+			SetPaintBallMode(bBalls);
+			SetDirection(Azimuth, Tilt);
+			DemoSpin = Spin;
+			StartRound();
+		};
+	};
+	// A new pool respawns the system (as Tick would on the cvar) and resets the round: start it again.
+	auto Count = [this, Exec](const TCHAR* Command, bool bBalls)
+	{
+		return [this, Exec, Command, bBalls]() { Exec(Command); bBalls ? SetupPaintBalls() : SetupRain(); StartRound(); };
+	};
+	DemoSteps = {
+		{ 0.0f, [this, Exec]() { Exec(TEXT("rain.paint.Count 100000")); Exec(TEXT("rain.paint.Balls 3500")); Exec(TEXT("rain.paint.BallsGPU 0"));
+			Exec(TEXT("fx.Niagara.Debug.Hud OverviewLocation=30,520")); SetFilmDrops(false); } },
+		{ 0.0f, Play(7, false, 30.0f, 30.0f, 14.0f) },
+		{ 0.0f, Say(TEXT("Paint Valley: steer a rain of paint until it covers the cream blocks")) },
+		{ 8.0f, Play(0, false, 45.0f, 25.0f, 20.0f) },
+		{ 8.0f, Say(TEXT("System 1: 100,000 GPU drops. Every landing is read back from the GPU and paints the surface")) },
+		{ 16.0f, Say(TEXT("Paint spreads as puddles that join. Drops that land on paint grow it")) },
+		{ 21.0f, [this]() { DemoSpin = 0.0f; BallPress(); } },
+		{ 21.0f, Say(TEXT("Hold the trackball still: the rain freezes and the clock stops")) },
+		{ 25.0f, [this]() { BallRelease(); } },
+		// Canopy: the roof overhangs the long block by a cell, two cells above it; from the open side (+Y), tilted low.
+		{ 26.0f, Play(1, false, -90.0f, 70.0f, 0.0f) },
+		{ 26.0f, Say(TEXT("Canopy: tilt the rain low to reach under the roof")) },
+		{ 33.0f, [this]() { SetFilmDrops(true); } },
+		{ 33.0f, Say(TEXT("Film look (F): each drop is a tiny lens that shows the scene behind it")) },
+		{ 40.0f, [this, Exec]() { SetFilmDrops(false); Exec(TEXT("rain.paint.BallWait 8")); } },
+		// Table: aimed at the ground just outside, the balls bounce once and skip in under the table top.
+		{ 40.0f, Play(6, true, 0.0f, 55.0f, 0.0f) },
+		{ 40.0f, Say(TEXT("System 2: 3,500 CPU paint balls. They bounce off the level and burst on the target")) },
+		{ 46.0f, Say(TEXT("A bank shot: aimed at the ground, the balls skip in under the table top")) },
+		{ 52.0f, Play(4, true, 30.0f, 35.0f, 20.0f) },
+		{ 52.0f, Say(TEXT("Balls collide with their nearest neighbours: a Particle Attribute Reader query on the CPU")) },
+		{ 60.0f, Play(0, false, 45.0f, 25.0f, 20.0f) },
+		{ 60.0f, [Exec]() { Exec(TEXT("stat unit")); Exec(TEXT("NiagaraDebugHud 1")); } },
+		{ 60.0f, Say(TEXT("Scaling, live (rain.paint.Count): 100k drops, at the 120 Hz cap")) },
+		{ 63.0f, Count(TEXT("rain.paint.Count 400000"), false) }, { 63.0f, Say(TEXT("Scaling, live (rain.paint.Count): 400k drops")) },
+		{ 66.5f, Count(TEXT("rain.paint.Count 1600000"), false) },
+		{ 66.5f, Say(TEXT("1.6M drops: the GPU sets the pace (about 50 ms a frame); the game thread stays under 3 ms")) },
+		{ 73.0f, [this, Exec]() { Exec(TEXT("rain.paint.Count 100000")); Exec(TEXT("rain.paint.Balls 8000")); SetupRain(); SetupPaintBalls(); } },
+		{ 73.0f, Play(3, true, 45.0f, 25.0f, 0.0f) },
+		{ 73.0f, Say(TEXT("8,000 paint balls on the CPU: the game thread (stat unit: Game) climbs to about 7 ms")) },
+		{ 78.0f, Count(TEXT("rain.paint.BallsGPU 1"), true) },
+		{ 78.0f, Say(TEXT("The same HLSL on the GPU (rain.paint.BallsGPU 1): the game thread drops to about 1 ms")) },
+		{ 83.0f, [this, Exec]() { Exec(TEXT("NiagaraDebugHud 0")); Exec(TEXT("stat unit")); Exec(TEXT("rain.paint.BallsGPU 0")); Exec(TEXT("rain.paint.Balls 3500"));
+			Exec(TEXT("rain.paint.BallWait 30")); SetupPaintBalls(); } },
+		{ 83.0f, Play(7, false, 210.0f, 30.0f, 14.0f) },
+		{ 83.0f, Say(TEXT("Paint Valley  |  UE 5.7, C++, Niagara  |  two systems, one mechanic")) },
+		{ 88.0f, [this]() { if (bQuitAfterDemo) { GEngine->Exec(GetWorld(), TEXT("quit")); } } },
+	};
+	DemoNext = 0;
+	DemoClock = 0.0f;
+}
+
+void ARainPaintGame::TickDemo(float DeltaSeconds)
+{
+	if (DemoClock < 0.0f)
+	{
+		return;
+	}
+	DemoClock += DeltaSeconds;
+	if (DemoSpin != 0.0f && Phase == EPaintPhase::Painting)
+	{
+		SetDirection(SteerAzimuth + DemoSpin * DeltaSeconds, SteerTilt);
+	}
+	while (DemoSteps.IsValidIndex(DemoNext) && DemoSteps[DemoNext].At <= DemoClock)
+	{
+		DemoSteps[DemoNext++].Do();
+	}
+	if (!DemoSteps.IsValidIndex(DemoNext))
+	{
+		DemoClock = -1.0f;
+		DemoSpin = 0.0f;
+		DemoCaption.Reset();
+	}
 }

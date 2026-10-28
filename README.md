@@ -1,14 +1,74 @@
-# Paint Valley (branch `paint`) — the redesign
+# Paint Valley — Niagara at Scale (course project, branch `paint`)
 
-The `paint` branch turns the game into **Paint Valley**: a structure of blocks in Monument Valley's style, painted by a rain that you steer. The submitted Rain Shield is the tag `v1.0-rainshield`; its section below is unchanged.
+A puzzle game where **Niagara particles paint the level**. Structures of grid blocks float in Monument Valley's style. You steer a stream of paint with a trackball until it covers 90 % of the cream target blocks; the clock is the score, and the pool of paint can run out. Blockers and the ground take no paint. Paint spreads as puddles that join, and drops that land on paint grow it. The mechanic borrows from *Auditorium* (a particle stream bent by the player until it fills its targets). The earlier version, Rain Shield, is the tag `v1.0-rainshield`; its section below is unchanged.
 
-- **Goal.** Cover 90 % of the cream target blocks. Blockers and the ground repel paint. Paint spreads as puddles that join; small drops grow the paint they land on and are used up only there.
-- **System 1:** 100,000 GPU drops (`NS_PaintRain`).
-- **System 2:** 3,500 elastic CPU paint balls (`NS_PaintBalls`). They bounce off the level, burst on the target, and collide with each other through a neighbour query.
-- **Switching.** `Tab` switches between the systems before a round; the idle one is paused.
-- **Play:** open `/Game/RainMagic/Maps/L_PaintValley` and press Play. Drag the ball at the bottom right to turn the direction; hold it still to stop the rain and the clock; Enter starts.
+The same mechanic has two configurations; press **Tab** before a round to switch (the idle one is paused and hidden):
 
-Details are in **`Docs/PaintValley.md`**: the rules, both systems, the levels, the cvars, measured performance and a code map. Art notes are in `Docs/ArtDirection.md`.
+| | System 1: paint rain (simple, many) | System 2: paint balls (complex, few) |
+|---|---|---|
+| Asset | `NS_PaintRain` | `NS_PaintBalls` (CPU), `NS_PaintBallsGPU` (the same HLSL on the GPU, the measured port) |
+| Simulation, renderer | GPU compute, sprites | CPU (VectorVM), meshes |
+| Count | 100,000 (`rain.paint.Count`) | 3,500 (`rain.paint.Balls`) |
+| Per-particle logic | 3 rules: steer towards the player's direction (a hose-like lag), swept collision against up to 32 boxes, recycle on landing | State machine (cloud, flying, resting, burst); swept collision with bounce, friction and squash; collision with the 2 nearest balls (a neighbour query on a Particle Attribute Reader bound to the emitter) |
+| Back to gameplay | Each drop landing on a target face that is not full → Export Particle Data (GPU readback) → paint, pool | Each burst on the target → Export Particle Data → paint, pool |
+
+**Performance report:** `Docs/PaintValleyReport.pdf` (2 pages). Data: `Docs/Perf/paint_sweep.csv`. Profiler captures: `Docs/Perf/paint_*`.
+**Video:** `Renders/PaintValley_video.mp4` (86 s, 1080p; video files are not in git). It is a recording of the scripted tour `-PaintDemo` (`Scripts/paint_demo.sh`), with a stat overlay segment while the particle count changes live.
+**Design notes:** `Docs/PaintValley.md` (rules, both systems, levels, code map). Art notes: `Docs/ArtDirection.md`.
+
+## Build and run (Paint Valley)
+
+1. Build the editor target, as for Rain Shield below:
+   ```sh
+   "<UE_5.7>/Engine/Build/BatchFiles/Mac/Build.sh" ProjectRainEditor Mac Development -Project="$PWD/ProjectRain.uproject" -WaitMutex
+   ```
+2. Open `ProjectRain.uproject`. It opens **`/Game/RainMagic/Maps/L_PaintValley`**, which is also the game's default map. Press Play.
+3. All assets are generated from code, and the generated `.uasset` files are committed. To regenerate them, run this in the editor's Python console:
+   ```python
+   import unreal
+   L = unreal.RainBuilderLibrary
+   L.build_paint_assets()              # MPC_Paint, M_PaintSurface, M_PaintBackdrop, M_PaintBall
+   L.build_paint_rain_assets(100000)   # System 1: NS_PaintRain + M_PaintDrop
+   L.build_paint_ball_assets(3500)     # System 2: NS_PaintBalls, NS_PaintBallsGPU + M_PaintBlob
+   ```
+
+## Controls (Paint Valley)
+
+| Input | Action |
+|---|---|
+| Drag the ball (bottom right) | Turn the direction, like a globe. WASD / arrow keys also turn and tilt it |
+| Hold the ball still | Freeze the rain and stop the clock |
+| Enter / Space, R | Start the round; reset it |
+| Tab (before a round) | System 1 (rain) or System 2 (paint balls) |
+| F (before a round) | Drops in the air: paint look or film look |
+| Panel sliders | Pool size (before a round); drop opacity |
+| Q / E, wheel, PgUp / PgDn | Turn the view, zoom, change level (8 levels) |
+
+## Console variables (Paint Valley)
+
+| Cvar | Default | Effect |
+|---|---|---|
+| `rain.paint.Count` | 100000 | System 1's pool: drops, respawned at once |
+| `rain.paint.Balls` | 3500 | System 2's pool: paint balls, respawned at once |
+| `rain.paint.BallsGPU` | 0 | 1 runs System 2 on the GPU (the CPU → GPU port) |
+| `rain.paint.PauseIdle` | 1 | 0 keeps the idle system simulating |
+| `rain.paint.CloudWait`, `rain.paint.BallWait` | 8, 30 | Longest wait (s) of a recycled drop / ball before it falls again |
+| `rain.paint.Budget`, `rain.paint.BallBudget` | 2.0, 1.5 | Paint in each pool, as a multiple of what the goal needs |
+| `rain.paint.BigShare`, `rain.paint.BigSeed` | 0.03, 60 | Share of big drops; paint a big drop seeds |
+| `rain.paint.DropOpacity` | 1.0 | Opacity of the drops in the air (0–2) |
+
+Command-line options: `-PaintLevel=N`, `-PaintBalls`, `-PaintBallsGPU`, `-PaintCount=N` and `-PaintBallCount=N` (the pools from the start), `-PaintMeasure` (measure and quit), `-PaintDemo` (the video's tour).
+
+## Reproducing the numbers (Paint Valley)
+
+```sh
+Scripts/paint_sweep.sh rain        # System 1: 0 to 1.6M drops, one standalone 1920x1080 run per count
+Scripts/paint_sweep.sh balls       # System 2 on the CPU: 500 to 16k balls
+Scripts/paint_sweep.sh ballsgpu    # System 2's GPU port: 500 to 64k balls
+Scripts/paint_sweep.sh pause       # pausing the idle system, on (1) and off (0)
+python3 Scripts/paint_perf.py      # -> Docs/Perf/paint_sweep.csv and the report's figure
+Scripts/build_report.sh PaintValleyReport
+```
 
 ---
 

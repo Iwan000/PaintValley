@@ -51,7 +51,7 @@ public:
 
 	/** Builds the paint game's System 2: NS_PaintBalls (a pool of BallCount CPU paint balls by default,
 	 *  User.RainGameCount; launched along User.RainGameDir, bounced off the level's boxes, burst on the target and read
-	 *  back with Export Particle Data) and M_PaintBlob. */
+	 *  back with Export Particle Data), NS_PaintBallsGPU (the same HLSL on the GPU: the CPU -> GPU port) and M_PaintBlob. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildPaintBallAssets(int32 BallCount = 3500);
 

@@ -70,7 +70,7 @@ void APaintHUD::DrawHUD()
 	DrawRect(FLinearColor(Ink.R, Ink.G, Ink.B, 0.55f), X, Y, W * (Size > 0 ? float(Left) / Size : 0.0f), 7.0f * S);
 	Y += 16.0f * S;
 	DrawText(bBalls
-		? FString::Printf(TEXT("System 2: CPU paint balls %s   puddles %s"), *Number(Game->GetLivePaintBallCount()), *Number(Game->GetNumPuddles()))
+		? FString::Printf(TEXT("System 2: %s paint balls %s   puddles %s"), Game->GetPaintBallsOnGpu() ? TEXT("GPU") : TEXT("CPU"), *Number(Game->GetLivePaintBallCount()), *Number(Game->GetNumPuddles()))
 		: FString::Printf(TEXT("System 1: GPU drops %s   big %s   puddles %s"), *Number(Game->GetLiveParticleCount()), *Number(Game->GetBigActive()), *Number(Game->GetNumPuddles())),
 		Soft, X, Y, Font, 0.75f * S);
 	Y += 30.0f * S;
@@ -118,6 +118,19 @@ void APaintHUD::DrawHUD()
 	Slider(0, Game->GetPhase() != EPaintPhase::Painting);
 	Slider(1, !bBalls);
 
+	// The demo's caption, centred along the bottom, in place of the controls.
+	const FString Caption = Game->GetDemoCaption();
+	if (!Caption.IsEmpty())
+	{
+		const float Scale = 1.15f * S;
+		float CW = 0.0f, CH = 0.0f;
+		Canvas->TextSize(Font, Caption, CW, CH, Scale, Scale);
+		const float CX = 0.5f * (Canvas->ClipX - CW), CY = Canvas->ClipY - 70.0f * S;
+		DrawRect(FLinearColor(1.0f, 1.0f, 1.0f, 0.7f), CX - 18.0f * S, CY - 9.0f * S, CW + 36.0f * S, CH + 18.0f * S);
+		DrawRect(FLinearColor(Ink.R, Ink.G, Ink.B, 1.0f), CX - 18.0f * S, CY - 9.0f * S, 4.0f * S, CH + 18.0f * S);
+		DrawText(Caption, Text, CX, CY, Font, Scale);
+		return;
+	}
 	// The controls, small, along the bottom left.
 	DrawText(Game->GetFreeze() > 0.5f ? FString(TEXT("the rain is held   (let go of the ball)"))
 		: FString(TEXT("drag the ball: turn the direction    hold it still: stop the rain and the clock    Enter: start    R: again    Q/E: view    wheel: zoom    PgUp/PgDn: level")),
