@@ -43,14 +43,25 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildPaintAssets();
 
-	/** Builds the paint game's System 1: NS_PaintRain (RainCount GPU ink drops by default, User.RainGameCount; steered
-	 *  by User.RainGameDir, the level's boxes, carriers' hits read back with Export Particle Data) and M_PaintDrop. */
+	/** Builds the paint game's System 1: NS_PaintRain (a pool of RainCount GPU drops by default, User.RainGameCount;
+	 *  steered by User.RainGameDir, collided with the level's boxes, recycled except where the target takes them, the
+	 *  target's hits read back with Export Particle Data) and M_PaintDrop. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
-	static FString BuildPaintRainAssets(int32 RainCount = 3000);
+	static FString BuildPaintRainAssets(int32 RainCount = 200000);
+
+	/** Builds the paint game's System 2: NS_PaintBalls (a pool of BallCount CPU paint balls by default,
+	 *  User.RainGameCount; launched along User.RainGameDir, bounced off the level's boxes, burst on the target and read
+	 *  back with Export Particle Data) and M_PaintBlob. */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString BuildPaintBallAssets(int32 BallCount = 1500);
 
 	/** Diagnostics: lists every script of a system with its usage, sim target and rapid-iteration parameters. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString DescribeNiagaraSystem(const FString& ObjectPath);
+
+	/** Diagnostics: a module script's graph (every node, its pins with types and links, and custom HLSL code). */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString DumpNiagaraScriptGraph(const FString& ObjectPath);
 
 	/** Writes the generated HLSL (CPU + GPU) of every emitter script to Saved/NiagaraHlsl/<System>_<Emitter>_<usage>.hlsl. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")

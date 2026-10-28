@@ -1,3 +1,17 @@
+# Paint Valley (branch `paint`) — the redesign
+
+The `paint` branch turns the game into **Paint Valley**: a structure of blocks in Monument Valley's style, painted by a rain that you steer. The submitted Rain Shield is the tag `v1.0-rainshield`; its section below is unchanged.
+
+- **Goal.** Cover 90 % of the cream target blocks. Blockers and the ground repel paint. Paint spreads as puddles that join; small drops grow the paint they land on and are used up only there.
+- **System 1:** 200,000 GPU drops (`NS_PaintRain`).
+- **System 2:** 1,500 elastic CPU paint balls (`NS_PaintBalls`). They bounce off the level, burst on the target, and collide with each other through a neighbour query.
+- **Switching.** `Tab` switches between the systems before a round; the idle one is paused.
+- **Play:** open `/Game/RainMagic/Maps/L_PaintValley` and press Play. Drag the ball at the bottom right to turn the direction; hold it still to stop the rain and the clock; Enter starts.
+
+Details are in **`Docs/PaintValley.md`**: the rules, both systems, the levels, the cvars, measured performance and a code map. Art notes are in `Docs/ArtDirection.md`.
+
+---
+
 # Rain Shield — Niagara at Scale (course project)
 
 A puzzle game where **Niagara particles decide the outcome**. A shape floats in a 10×10×10 grid. You place the blocker pieces the level gives you, pick the direction the weather comes from (26 directions, locked once it starts), and then it falls for a fixed time. Every drop that reaches the shape is read back from the simulation; how wet the shape gets decides the stars. It borrows from *Auditorium* (particle streams shaped by placed geometry).

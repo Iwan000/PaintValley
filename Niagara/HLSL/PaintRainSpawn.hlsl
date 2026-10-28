@@ -3,8 +3,8 @@
 //
 // The rain is a stream along the player's direction D (User.RainGameDir) through a cylinder around the level: a
 // disc of radius User.RainGameHalf across D, User.RainGameLength along it, centred on User.RainGameCenter. The
-// drops start spread through it (the stream is full at once). A few of them, User.RainPaintCarrierFrac, carry
-// paint (the big drops, whose hits make puddles); the rest are small drops that make puddles spread.
+// pool is spawned once; User.RainPaintBigFrac of it are big drops (they seed puddles), the rest small drops (they
+// feed the puddles they land on, and are used up there). See PaintRainUpdate.hlsl for the cycle.
 // $(...) placeholders are replaced by the C++ builder.
 // =====================================================================================
 #define PN_NEXT(S) S = S * 747796405u + 2891336453u;
@@ -24,16 +24,19 @@ float3 PnV = cross(PnD, PnU);
 float PnRad = User.RainGameHalf * sqrt(PnR0);
 float PnAng = 6.2831853 * PnR1;
 
-Particles.Position = User.RainGameCenter + (PnU * cos(PnAng) + PnV * sin(PnAng)) * PnRad + PnD * ((PnR2 - 0.5) * User.RainGameLength);
+// Every drop starts in the cloud, waiting a random share of the cloud time, so the rain arrives as a steady stream.
+Particles.Position = User.RainGameCenter + (PnU * cos(PnAng) + PnV * sin(PnAng)) * PnRad - PnD * (0.5 * User.RainGameLength);
 Particles.Velocity = PnD * User.RainPaintSpeed * (0.9 + 0.2 * PnR3);
-Particles.PaintCarrier = PnR4 < User.RainPaintCarrierFrac ? 1.0 : 0.0;
+Particles.PaintCarrier = PnR4 < User.RainPaintBigFrac ? 1.0 : 0.0;
 Particles.RainRand = float4(PnR3, PnR5, PnR6, PnR4);
 Particles.RainTimer = 0.0;
-Particles.PaintAge = 1.0;
+Particles.PaintAge = 0.0;
 Particles.PaintKind = 0.0;
+Particles.PaintState = 0.0;
+Particles.PaintEpoch = User.RainPaintEpoch;
 Particles.RainGameHit = false;
 Particles.RainGameHitPos = float3(0.0, 0.0, 0.0);
-Particles.PaintRipple = 0.0;
+Particles.PaintRipple = PnR2 * User.RainPaintCloudWait;
 Particles.PaintNormal = float3(0.0, 0.0, 1.0);
 Particles.SpriteAlignment = PnD;
 Particles.SpriteFacing = User.RainViewFacing;

@@ -97,9 +97,10 @@ struct FPaintLevel
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") FVector ViewTarget = FVector(0.0, 0.0, 70.0);
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float ViewHeight = 700.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") FColor Ink = FColor(0x6a, 0x3c, 0xff);
-	/** Radius a carrier's puddle spreads to (cm) and the time for three stars (s). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float SplatRadius = 6.0f;
+	/** The time for three stars (s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float ParSeconds = 30.0f;
+	/** Played with System 2 (paint balls that bounce) by default, else with the rain (Tab switches before a round). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") bool bPaintBalls = false;
 };
 
 UCLASS()
@@ -114,24 +115,41 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** Export Particle Data calls this on the game thread with the paint carriers that hit a box (a few frames late). */
+	/** Export Particle Data calls this on the game thread with the drops the target took (a few frames late): the
+	 *  small drops it consumed and the big drops that seed puddles. */
 	virtual void ReceiveParticleData_Implementation(const TArray<FBasicParticleData>& Data, UNiagaraSystem* NiagaraSystem, const FVector& SimulationPositionOffset) override;
 
 	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UProceduralMeshComponent> Surfaces;
 	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UNiagaraComponent> Rain;
 	UPROPERTY(EditAnywhere, Category = "Paint") TSoftObjectPtr<UNiagaraSystem> RainSystem;
-	/** Big drops (they paint puddles; the rest of rain.paint.Count are small drops that make puddles spread). */
-	UPROPERTY(EditAnywhere, Category = "Paint") int32 CarrierCount = 300;
-	/** With rain.paint.SmallPaints 1: the puddle a small drop paints (cm). */
-	UPROPERTY(EditAnywhere, Category = "Paint") float SmallPuddleRadius = 4.0f;
+	/** System 2: elastic paint balls (CPU meshes, rain.paint.Balls of them), launched along the same direction; they
+	 *  bounce off the ground and the blockers and burst on the target. Only one system plays at a time (the other is
+	 *  paused). */
+	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UNiagaraComponent> PaintBalls;
+	UPROPERTY(EditAnywhere, Category = "Paint") TSoftObjectPtr<UNiagaraSystem> PaintBallSystem;
+	/** The pool's tuning below follows the cvars rain.paint.BigShare, rain.paint.Budget and rain.paint.BigSeed.
+	 *  The pool (rain.paint.Count drops, spawned once): this share are big drops, the rest small ones. Big drops seed
+	 *  puddles and are never used up; they fall in proportion to the small drops still left. A small drop is used up
+	 *  only where it lands on paint (it feeds that puddle); on bare surface it goes back to the cloud. */
+	UPROPERTY(EditAnywhere, Category = "Paint") float BigShare = 0.03f;
+	/** Paint in the whole pool, as a multiple of what the coverage goal needs: each small drop carries this share of
+	 *  it, so the count changes the cost, not the difficulty. A big drop seeds a puddle of BigSeedDrops small drops. */
+	UPROPERTY(EditAnywhere, Category = "Paint") float PaintBudget = 2.0f;
+	UPROPERTY(EditAnywhere, Category = "Paint") float BigSeedDrops = 60.0f;
 	UPROPERTY(EditAnywhere, Category = "Paint") float RainSpeed = 700.0f;
 	/** Share of the target's visible surface that ends the round. */
 	UPROPERTY(EditAnywhere, Category = "Paint") float CoverageGoal = 0.9f;
 	/** Steering rates (degrees per second): around the vertical and away from straight down. */
 	UPROPERTY(EditAnywhere, Category = "Paint") float SteerYawRate = 100.0f;
 	UPROPERTY(EditAnywhere, Category = "Paint") float SteerTiltRate = 70.0f;
+	/** The trackball at the bottom right, a see-through globe whose poles are the rain's axis: radius as a share of the
+	 *  view's height; seconds of a still press that freezes the rain; seconds for the rain to stop or start again. */
+	UPROPERTY(EditAnywhere, Category = "Paint") float BallSize = 0.07f;
+	UPROPERTY(EditAnywhere, Category = "Paint") float FreezePressSeconds = 0.25f;
+	UPROPERTY(EditAnywhere, Category = "Paint") float FreezeEaseSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialInterface> SurfaceMaterial;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialInterface> BackdropMaterial;
+	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialInterface> BallMaterial;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialParameterCollection> Collection;
 	UPROPERTY(EditAnywhere, Category = "Paint") TArray<FPaintLevel> Levels;
 
@@ -145,22 +163,79 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Paint") FString Describe() const;
 	/** Starts the rain and the clock (Enter). */
 	UFUNCTION(BlueprintCallable, Category = "Paint") void StartRound();
-	/** Clears the paint and waits again (R). */
+	/** Clears the paint, refills the pool and waits again (R). */
 	UFUNCTION(BlueprintCallable, Category = "Paint") void ResetRound();
 	/** The rain's direction: Azimuth around the vertical, Tilt away from straight down (degrees, 0..180). */
 	UFUNCTION(BlueprintCallable, Category = "Paint") void SetDirection(float Azimuth, float Tilt);
+	/** The trackball, as the mouse drives it (also from Python): press on it (from Python: at its centre), drag the
+	 *  cursor by (Dx, Dy) pixels (screen axes, y down), release. Like a globe: the point of its surface under the
+	 *  cursor stays under it, and the arrow turns with the ball. A still press freezes the rain. */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void BallPress();
+	UFUNCTION(BlueprintCallable, Category = "Paint") void BallRoll(float Dx, float Dy);
+	UFUNCTION(BlueprintCallable, Category = "Paint") void BallRelease();
 	UFUNCTION(BlueprintPure, Category = "Paint") float GetCoverage() const { return Surface.TargetCoverage(); }
 	UFUNCTION(BlueprintPure, Category = "Paint") float GetClock() const { return Clock; }
 	UFUNCTION(BlueprintPure, Category = "Paint") EPaintPhase GetPhase() const { return Phase; }
-	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPaintHits() const { return PaintHits; }
+	UFUNCTION(BlueprintPure, Category = "Paint") bool IsOutOfRain() const { return bOutOfRain; }
+	/** Small drops in the pool at the start of the round, and still left (used up only on paint). */
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPoolSize() const { return PoolSize; }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPoolLeft() const { return FMath::Max(PoolSize - Consumed, 0); }
+	/** Big drops falling now (BigShare of the small drops left). */
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetBigActive() const;
+	UFUNCTION(BlueprintPure, Category = "Paint") float GetFreeze() const { return Freeze; }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetRainCount() const { return RainCount; }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetNumPuddles() const { return Surface.NumPuddles(); }
+	/** Rain particles alive (the GPU count, read back by Niagara). */
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetLiveParticleCount() const;
+	UFUNCTION(BlueprintPure, Category = "Paint") FString GetLevelName() const;
+	UFUNCTION(BlueprintPure, Category = "Paint") float GetParSeconds() const;
+	UFUNCTION(BlueprintPure, Category = "Paint") FVector GetDirection() const { return Direction(); }
+	UFUNCTION(BlueprintPure, Category = "Paint") FLinearColor GetInkColor() const;
+	/** The drops in the air: the paint look (false) or the film's water drops (true, a lens image of what is behind
+	 *  them). Landed, both paint the same. Switched before a round (F, or the panel's button). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void SetFilmDrops(bool bFilm);
+	/** Plays with System 2 (paint balls) or the rain; switching waits for a new round (Tab). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void SetPaintBallMode(bool bBalls);
+	UFUNCTION(BlueprintPure, Category = "Paint") bool GetPaintBallMode() const { return bPaintBallMode; }
+	/** Paint balls in the pool at the start of the round, and still left (used up where they burst on the target). */
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPaintBallPool() const { return PaintBallPool; }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPaintBallsLeft() const { return FMath::Max(PaintBallPool - PaintBallsUsed, 0); }
+	/** Paint balls alive in the CPU emitter (the whole pool: none is ever killed). */
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetLivePaintBallCount() const;
+	/** Diagnostics: Max paint balls (spread over the pool) with their state, cycle, seeds and position. */
+	UFUNCTION(BlueprintCallable, Category = "Paint") FString DebugPaintBalls(int32 Max = 20) const;
+	UFUNCTION(BlueprintPure, Category = "Paint") bool GetFilmDrops() const { return bFilmDrops; }
+	/** The panel's look button, as the HUD drew it (viewport pixels): a click there switches the look. */
+	void SetLookButton(const FBox2D& Rect) { LookButton = Rect; }
+	void SetSystemButton(const FBox2D& Rect) { SystemButton = Rect; }
+	/** The panel's sliders: 0 the pool's size (before a round; applied on release), 1 the drops' opacity (any time).
+	 *  The HUD draws them where it reports them (viewport pixels; an invalid box hides one). */
+	void SetSliderRect(int32 Slider, const FBox2D& Rect) { if (Slider >= 0 && Slider < 2) { SliderRects[Slider] = Rect; } }
+	float GetSliderValue(int32 Slider) const;
+	FString GetSliderLabel(int32 Slider) const;
+	/** How opaque the drops in the air are, times their own opacity (rain.paint.DropOpacity, 0..2). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void SetDropOpacity(float Opacity);
 
 private:
 	void BuildLevel();
 	void SetupRain();
+	void SetupPaintBalls();
+	/** The direction, the stream and the level's boxes' state shared by both systems. */
+	void UploadShared(UNiagaraComponent* System, bool bActive);
+	/** Plays the chosen system, pauses the other. */
+	void ApplySystemMode();
 	void UploadRain();
+	void UploadFullFaces();
+	void UploadBoxes();
 	FVector Direction() const;
-	void ShowHud() const;
+	void SetDirectionVector(const FVector& D);
 	void UpdateCamera();
+	void PlaceBall();
+	/** The ball under a screen point (pixels): its surface point facing the camera, world axes about its centre (a
+	 *  unit vector; on the rim beyond its outline). Grab at a point, then drag to another. */
+	FVector BallPoint(const FVector2D& Screen) const;
+	void BallGrab(const FVector2D& Screen);
+	void BallDragTo(const FVector2D& Screen);
 	void HandleInput(float DeltaSeconds);
 
 	// -PaintMeasure: settle 4 s, then average stat unit's raw times over 5 s, log them and quit.
@@ -174,16 +249,44 @@ private:
 
 	int32 LevelIndex = 0;
 	FPaintSurface Surface;
+	bool bFilmDrops = false;
+	/** rain.paint.BigShare as last applied (BigShare is it clamped). */
+	float BigShareSet = 0.03f;
+	/** Seconds since the pool ran dry (the round ends when the paint has settled, or after 3 s). */
+	float DryClock = 0.0f;
+	/** rain.paint.PauseIdle as last applied. */
+	bool PausedIdle = true;
+	bool bPaintBallMode = false;
+	// System 2's pool: balls at the start, used up; the paint each one carries (cm^2); its round (as Epoch).
+	int32 PaintBallCount = 0;
+	int32 PaintBallPool = 0;
+	int32 PaintBallsUsed = 0;
+	float PaintBallArea = 1.0f;
+	float PaintBallEpoch = 0.0f;
+	FBox2D LookButton = FBox2D(ForceInit);
+	FBox2D SystemButton = FBox2D(ForceInit);
+	FBox2D SliderRects[2] = { FBox2D(ForceInit), FBox2D(ForceInit) };
+	int32 DraggingSlider = INDEX_NONE;
+	/** The pool slider's count while it is dragged (the pool is rebuilt when it is let go). */
+	int32 PoolSliderCount = 0;
+	float DropOpacity = 1.0f;
 	EPaintPhase Phase = EPaintPhase::Ready;
+	bool bOutOfRain = false;
 	float Clock = 0.0f;
 	float SteerAzimuth = 45.0f;
 	float SteerTilt = 25.0f;
-	int32 PaintHits = 0;
-	int32 SmallHits = 0;
-	int32 SmallFed = 0;
-	float ExportProb = 1.0f;
+
+	// The pool: small drops at the start, used up; the paint each one carries (cm^2); where the paint came from.
+	int32 PoolSize = 0;
+	int32 Consumed = 0;
+	float PaintPerDrop = 1.0f;
+	int32 BigSeeds = 0;
+	double PaintFromSmall = 0.0;
+	double PaintFromBig = 0.0;
 	int32 MaxHitsPerFrame = 0;
-	uint32 SplatSeed = 1;
+	int32 FullExports = 0;
+	float Epoch = 0.0f;
+	float FullFacesClock = 0.0f;
 	int32 RainCount = 0;
 	int32 BoxesUsed = 0;
 	/** The stream around the level (world space): centre, disc radius, length. */
@@ -194,9 +297,31 @@ private:
 	float ViewAspect = 0.0f;
 	double BuildSeconds = 0.0;
 
+	// The trackball: pressed on it, where and how long ago, how far the cursor went from there; the freeze.
+	bool bBallHeld = false;
+	/** Held with the mouse (let go when the button is up), not from a script. */
+	bool bBallByMouse = false;
+	float BallHeldSeconds = 0.0f;
+	float BallMoved = 0.0f;
+	bool bFreezeHeld = false;
+	float Freeze = 0.0f;
+	FVector2D BallPressAt = FVector2D::ZeroVector;
+	/** The cursor (pixels) and the surface point under it (BallPoint) as of the last drag. */
+	FVector2D BallCursor = FVector2D::ZeroVector;
+	FVector BallGrabbed = FVector::ForwardVector;
+	FVector2D BallScreen = FVector2D::ZeroVector;
+	float BallScreenRadius = 0.0f;
+	/** The ball's orientation (world): its local -Z pole is the rain's direction, as of BallSpinDir. */
+	FQuat BallSpin = FQuat::Identity;
+	FVector BallSpinDir = FVector::ZeroVector;
+
 	UPROPERTY(Transient) TObjectPtr<ACameraActor> Camera;
 	UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> Backdrop;
+	UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> Ball;
+	UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> BallShaft;
+	UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> BallTip;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> Atlas;
 	UPROPERTY(Transient) TArray<TObjectPtr<UMaterialInstanceDynamic>> Materials;
 	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> BackdropMID;
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> BallMID;
 };

@@ -10,7 +10,7 @@
 //   - baked ambient occlusion tinted with AOColor (atlas G),
 //   - openings (doors, windows, portholes; atlas B, a signed distance: rim, ring and core bands, sharp to the pixel),
 //   - a thin light line along convex top edges (atlas A, EdgeColor.a = amount),
-//   - paint (atlas R, InkColor): puddles, a metaball field sharpened the same way,
+//   - paint (atlas R, InkColor): puddles of one even colour, a metaball field sharpened the same way,
 //   - a fade towards FadeColor below z1 (Fade: z0, z1, amount): the structure dissolves into the backdrop.
 // The facet normal comes from the screen-space derivatives of the position, so cones and domes are flat-shaded
 // whatever their vertex normals.
@@ -68,15 +68,41 @@ PsC = lerp(PsC, PsOpen * lerp(0.9, 1.0, PsSideT), PsO);
 float PsE = saturate((PsA.a - 0.667) / max(fwidth(PsA.a), 1e-4) + 0.5) * EdgeColor.a * (1.0 - PsO);
 PsC = lerp(PsC, EdgeColor.rgb, PsE);
 
-// Paint: puddles (the user's reference, Docs/ArtDirection.md). R is the puddles' metaball field (0.5 on the
-// edge): merged circles with a scalloped outline, sharpened to the pixel. A flat, matte colour in the face's tones
-// (tops lighter, dark sides darker), a little see-through (the floor's lines show), a lighter rim along the edge.
-float PsI = saturate((PsA.r - 0.5) / max(0.7 * fwidth(PsA.r), 1e-4) + 0.5);
-float PsRim = 1.0 - saturate((PsA.r - 0.5) / max(1.6 * fwidth(PsA.r), 1e-4));
-float3 PsInkSide = lerp(InkColor * float3(0.72, 0.78, 0.88), InkColor, PsSideT);
-float3 PsInk = (PsN.z >= 0.0 ? lerp(PsInkSide, lerp(InkColor, float3(1.0, 1.0, 1.0), 0.18), PsZ2) : PsInkSide * 0.8) * PsAO;
-PsInk = lerp(PsInk, lerp(PsInk, float3(1.0, 1.0, 1.0), 0.28), PsRim);
-PsC = lerp(PsC, PsInk, PsI * 0.92);
+// Paint: puddles of one even colour, whatever their depth (the user's choice, Docs/ArtDirection.md). R is the
+// puddles' metaball field over four times the paint level: the paint shows from 0.25. Only
+//   - an edge that wanders a little (fine noise on the field, near the edge only), so no puddle is a stamped circle;
+//   - a faint broad drift of value (low-frequency noise in world space, +-3 %), so a large area is not dead flat.
+// Toned like the face under it and a little see-through (the floor's lines show).
+struct FPsNoise
+{
+	float Hash(float3 P)
+	{
+		P = frac(P * 0.1031);
+		P += dot(P, P.zyx + 31.32);
+		return frac((P.x + P.y) * P.z);
+	}
+	float Value(float3 P)
+	{
+		float3 I = floor(P);
+		float3 F = frac(P);
+		F = F * F * (3.0 - 2.0 * F);
+		return lerp(lerp(lerp(Hash(I), Hash(I + float3(1, 0, 0)), F.x), lerp(Hash(I + float3(0, 1, 0)), Hash(I + float3(1, 1, 0)), F.x), F.y),
+			lerp(lerp(Hash(I + float3(0, 0, 1)), Hash(I + float3(1, 0, 1)), F.x), lerp(Hash(I + float3(0, 1, 1)), Hash(I + float3(1, 1, 1)), F.x), F.y), F.z);
+	}
+};
+FPsNoise PsNz;
+float PsBroad = PsNz.Value(PsP / 70.0) * 0.5 + PsNz.Value(PsP / 23.0) * 0.3 + PsNz.Value(PsP / 9.0) * 0.2;
+float PsFine = PsNz.Value(PsP / 3.5);
+// The fine noise only wobbles the edge: it fades out a little way inside, so the interior stays smooth.
+float PsR = PsA.r + (PsFine - 0.5) * 0.06 * (1.0 - saturate((PsA.r - 0.25) / 0.08));
+float PsW = max(fwidth(PsR), 1e-4);
+float PsI = saturate((PsR - 0.25) / (0.7 * PsW) + 0.5);
+float3 PsWash = InkColor * lerp(0.97, 1.03, PsBroad);
+// The face's tone: tops as they are, sides from dark to light, undersides darker. Continuous in N.z: on a wall
+// the screen-space normal's z is 0 give or take rounding, and a branch on its sign would flicker pixel by pixel.
+float3 PsTone = lerp(float3(0.74, 0.8, 0.9), float3(0.94, 0.96, 1.0), PsSideT);
+PsTone = lerp(PsTone, float3(1.0, 1.0, 1.0), saturate(PsN.z) * saturate(PsN.z)) * lerp(1.0, 0.8, saturate(-PsN.z));
+PsC = lerp(PsC, PsWash * PsTone * PsAO, PsI * 0.9);
 
 float PsF = saturate((Fade.y - PsP.z) / max(Fade.y - Fade.x, 1.0)) * Fade.z;
 PsC = lerp(PsC, FadeColor, PsF);

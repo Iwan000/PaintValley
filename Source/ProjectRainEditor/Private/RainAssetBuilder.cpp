@@ -19,8 +19,11 @@
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionSceneColor.h"
 #include "Materials/MaterialExpressionTime.h"
 #include "Materials/MaterialExpressionVertexColor.h"
+#include "Materials/MaterialExpressionLocalPosition.h"
+#include "Materials/MaterialExpressionVertexNormalWS.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEmitter.h"
@@ -1288,6 +1291,49 @@ namespace
 		CompileMaterialAndReport(M, Report);
 		return M;
 	}
+
+	// The trackball: a see-through globe (Materials/HLSL/PaintBall.hlsl), lined in its own space so the lines turn
+	// with it; the arrow inside stays opaque.
+	UMaterial* BuildPaintBallMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_PaintBall"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Translucent;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = false;
+		UMaterialExpressionCustom* Custom = AddCustom(M, TEXT("Materials/HLSL/PaintBall.hlsl"), CMOT_Float4);
+		int32 Y = -300;
+		auto Vec = [M, &Y](const TCHAR* Name, const FLinearColor& Default)
+		{
+			UMaterialExpressionVectorParameter* P = AddExpr<UMaterialExpressionVectorParameter>(M, -900, Y += 90);
+			P->ParameterName = Name;
+			P->DefaultValue = Default;
+			return P;
+		};
+		UMaterialExpressionLocalPosition* Local = AddExpr<UMaterialExpressionLocalPosition>(M, -900, Y += 90);
+		AddCustomInput(Custom, TEXT("LocalPos"), Local);
+		UMaterialExpressionVertexNormalWS* Normal = AddExpr<UMaterialExpressionVertexNormalWS>(M, -900, Y += 90);
+		AddCustomInput(Custom, TEXT("NormalWS"), Normal);
+		UMaterialExpressionCameraVectorWS* View = AddExpr<UMaterialExpressionCameraVectorWS>(M, -900, Y += 90);
+		AddCustomInput(Custom, TEXT("ToCamera"), View);
+		AddCustomInput(Custom, TEXT("Body"), Vec(TEXT("Body"), FLinearColor::FromSRGBColor(FColor(0xf6, 0xf1, 0xe4))));
+		AddCustomInput(Custom, TEXT("Line"), Vec(TEXT("Line"), FLinearColor::FromSRGBColor(FColor(0x8a, 0x80, 0x6c))));
+		// x: opacity at the centre, y: at the rim, z: of the lines.
+		AddCustomInput(Custom, TEXT("Opacity"), Vec(TEXT("Opacity"), FLinearColor(0.12f, 0.62f, 0.5f, 0.0f)));
+		AddCustomInput(Custom, TEXT("Shine"), Vec(TEXT("Shine"), FLinearColor(-0.3f, -0.6f, 0.75f, 0.0f)));
+		UMaterialExpressionComponentMask* RGB = AddExpr<UMaterialExpressionComponentMask>(M, 0, -60);
+		RGB->R = RGB->G = RGB->B = true;
+		RGB->A = false;
+		RGB->Input.Connect(0, Custom);
+		UMaterialExpressionComponentMask* A = AddExpr<UMaterialExpressionComponentMask>(M, 0, 60);
+		A->R = A->G = A->B = false;
+		A->A = true;
+		A->Input.Connect(0, Custom);
+		UMaterialEditingLibrary::ConnectMaterialProperty(RGB, TEXT(""), MP_EmissiveColor);
+		UMaterialEditingLibrary::ConnectMaterialProperty(A, TEXT(""), MP_Opacity);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
 }
 
 FString URainBuilderLibrary::BuildPaintAssets()
@@ -1296,6 +1342,7 @@ FString URainBuilderLibrary::BuildPaintAssets()
 	UMaterialParameterCollection* MPC = BuildPaintCollection();
 	bool bOk = BuildPaintSurfaceMaterial(MPC, Report) != nullptr;
 	bOk &= BuildPaintBackdropMaterial(Report) != nullptr;
+	bOk &= BuildPaintBallMaterial(Report) != nullptr;
 	return FString::Printf(TEXT("%s\n%s"), Report.Contains(TEXT("ERROR")) ? TEXT("FAILED") : TEXT("SUCCESS"), *Report);
 }
 
@@ -1310,11 +1357,16 @@ namespace
 		/** Seconds for a drop's velocity to turn towards a new direction. */
 		float SteerTau = 0.25f;
 		/** Big and small drops: bead width (cm), streak length per cm/s of speed (s), the small ones' opacity. */
-		float BigWidth = 3.2f;
-		float BigStreak = 0.03f;
-		float SmallWidth = 1.3f;
-		float SmallStreak = 0.035f;
-		float SmallAlpha = 0.7f;
+		float BigWidth = 4.2f;
+		float BigStreak = 0.018f;
+		float SmallWidth = 2.6f;
+		float SmallStreak = 0.02f;
+		float SmallAlpha = 0.38f;
+		/** Held in the air (the freeze): a drop rounds up this many times its width, see-through (small and big drops'
+		 *  opacity, the paint look). */
+		float BeadScale = 1.4f;
+		float BeadAlpha = 0.5f;
+		float BeadAlphaBig = 0.7f;
 		/** Ripples: seconds, diameter (cm) of a small and a big drop's ring, opacity. */
 		float RippleLife = 0.5f;
 		float RippleSize = 9.0f;
@@ -1336,10 +1388,33 @@ namespace
 		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -900, -100);
 		AddCustomInput(Custom, TEXT("PColor"), PColor, 5);
 		UMaterialExpressionDynamicParameter* Dyn = AddExpr<UMaterialExpressionDynamicParameter>(M, -900, 0);
-		Dyn->ParamNames = { TEXT("Kind"), TEXT("WidthOverLength"), TEXT("RippleAge"), TEXT("Unused3") };
+		Dyn->ParamNames = { TEXT("Kind"), TEXT("WidthOverLength"), TEXT("RippleAgeOrHold"), TEXT("Film") };
 		AddCustomInput(Custom, TEXT("DynX"), Dyn, 0);
 		AddCustomInput(Custom, TEXT("DynY"), Dyn, 1);
 		AddCustomInput(Custom, TEXT("DynZ"), Dyn, 2);
+		AddCustomInput(Custom, TEXT("DynW"), Dyn, 3);
+		// The film look's lens image: the scene behind, looked up at the offset PaintDropLens.hlsl gives. Scene Color's
+		// class is not exported from the engine: made by name, its fields set through its header.
+		UMaterialExpressionCustom* Lens = AddExpr<UMaterialExpressionCustom>(M, -900, 150);
+		Lens->Description = TEXT("Materials/HLSL/PaintDropLens.hlsl");
+		Lens->Code = LoadTextFile(TEXT("Materials/HLSL/PaintDropLens.hlsl"));
+		Lens->OutputType = CMOT_Float2;
+		Lens->Inputs.Reset();
+		AddCustomInput(Lens, TEXT("UV"), UV);
+		AddCustomInput(Lens, TEXT("DynY"), Dyn, 1);
+		UClass* SceneColorClass = FindObject<UClass>(nullptr, TEXT("/Script/Engine.MaterialExpressionSceneColor"));
+		UMaterialExpressionSceneColor* SceneColor = SceneColorClass
+			? static_cast<UMaterialExpressionSceneColor*>(UMaterialEditingLibrary::CreateMaterialExpression(M, SceneColorClass, -600, 150)) : nullptr;
+		if (SceneColor)
+		{
+			SceneColor->InputMode = EMaterialSceneAttributeInputMode::OffsetFraction;
+			SceneColor->Input.Connect(0, Lens);
+			AddCustomInput(Custom, TEXT("Scene"), SceneColor, 0);
+		}
+		else
+		{
+			Report += TEXT("  ERROR: no Scene Color expression class\n");
+		}
 		UMaterialExpressionComponentMask* RGB = AddExpr<UMaterialExpressionComponentMask>(M, 0, -60);
 		RGB->R = RGB->G = RGB->B = true;
 		RGB->A = false;
@@ -1366,10 +1441,20 @@ namespace
 		Text.ReplaceInline(TEXT("$(SMALL_WIDTH)"), *F(P.SmallWidth));
 		Text.ReplaceInline(TEXT("$(SMALL_STREAK)"), *F(P.SmallStreak));
 		Text.ReplaceInline(TEXT("$(SMALL_ALPHA)"), *F(P.SmallAlpha));
+		Text.ReplaceInline(TEXT("$(BEAD_SCALE)"), *F(P.BeadScale));
+		Text.ReplaceInline(TEXT("$(BEAD_ALPHA_BIG)"), *F(P.BeadAlphaBig));
+		Text.ReplaceInline(TEXT("$(BEAD_ALPHA)"), *F(P.BeadAlpha));
 		Text.ReplaceInline(TEXT("$(RIPPLE_LIFE)"), *F(P.RippleLife));
 		Text.ReplaceInline(TEXT("$(RIPPLE_SIZE)"), *F(P.RippleSize));
 		Text.ReplaceInline(TEXT("$(RIPPLE_SIZE_BIG)"), *F(P.RippleSizeBig));
 		Text.ReplaceInline(TEXT("$(RIPPLE_ALPHA)"), *F(P.RippleAlpha));
+		Text.ReplaceInline(TEXT("$(KIND_TARGET)"), *F(RainShield::BoxProtected));
+		FString Boxes;
+		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		{
+			Boxes += FString::Printf(TEXT("\t\tGR_BOX(User.RainBox%dMin, User.RainBox%dMax, User.RainBox%dKind, User.RainBox%dFull)\n"), i, i, i, i);
+		}
+		Text.ReplaceInline(TEXT("$(PAINT_BOX_TESTS)"), *Boxes);
 		return Text;
 	}
 }
@@ -1395,15 +1480,21 @@ FString URainBuilderLibrary::BuildPaintRainAssets(int32 RainCount)
 		FNiagaraVariable Speed(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintSpeed"));
 		Speed.SetValue(700.0f);
 		Add(Speed);
-		FNiagaraVariable Frac(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintCarrierFrac"));
-		Frac.SetValue(0.003f);
-		Add(Frac);
+		auto Float = [&Add](const TCHAR* Name, float V) { FNiagaraVariable Var(FNiagaraTypeDefinition::GetFloatDef(), Name); Var.SetValue(V); Add(Var); };
+		Float(TEXT("RainPaintBigFrac"), 0.03f);
+		Float(TEXT("RainPaintLeft"), 1.0f);
+		Float(TEXT("RainPaintFilm"), 0.0f);
+		Float(TEXT("RainPaintOpacity"), 1.0f);
+		Float(TEXT("RainPaintCloudWait"), 4.0f);
+		Float(TEXT("RainPaintEpoch"), 0.0f);
+		Float(TEXT("RainFreeze"), 0.0f);
+		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		{
+			Float(*FString::Printf(TEXT("RainBox%dFull"), i), 0.0f);
+		}
 		FNiagaraVariable Ink(FNiagaraTypeDefinition::GetColorDef(), TEXT("RainPaintInk"));
 		Ink.SetValue(FLinearColor(0.15f, 0.45f, 0.85f, 1.0f));
 		Add(Ink);
-		FNiagaraVariable Prob(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintExportProb"));
-		Prob.SetValue(1.0f);
-		Add(Prob);
 		FNiagaraVariable Facing(FNiagaraTypeDefinition::GetVec3Def(), TEXT("RainViewFacing"));
 		Facing.SetValue(FVector3f(-0.577f, -0.577f, 0.577f));
 		Add(Facing);
@@ -1437,6 +1528,8 @@ FString URainBuilderLibrary::BuildPaintRainAssets(int32 RainCount)
 		FNiagaraVariable(F, TEXT("Particles.PaintKind")),
 		FNiagaraVariable(F, TEXT("Particles.PaintCarrier")),
 		FNiagaraVariable(F, TEXT("Particles.PaintRipple")),
+		FNiagaraVariable(F, TEXT("Particles.PaintState")),
+		FNiagaraVariable(F, TEXT("Particles.PaintEpoch")),
 		FNiagaraVariable(V3, TEXT("Particles.PaintNormal")),
 		FNiagaraVariable(V3, TEXT("Particles.SpriteFacing")),
 		FNiagaraVariable(GameHitParam),
@@ -1465,6 +1558,173 @@ FString URainBuilderLibrary::BuildPaintRainAssets(int32 RainCount)
 	const bool bOk = CompileAndReport(System, Report);
 	SaveAsset(System);
 	Report += FString::Printf(TEXT("Emitter PaintRain: User.RainGameCount drops (%s), %d boxes, carrier hit export %s\n"),
+		bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), RainShield::MaxBoxes, bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
+	return FString::Printf(TEXT("%s\n%s"), bOk && !Report.Contains(TEXT("ERROR")) ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
+}
+
+// ---------------------------------------------------------------------------------------------- Paint Valley balls
+// System 2 of the paint game: CPU paint balls (meshes) that bounce off the level and burst on the target.
+
+namespace
+{
+	struct FPaintBallConfig
+	{
+		int32 Seed = 41;
+		/** Radius (cm), launch speed, pull along the direction (cm/s^2) and top speed (cm/s). */
+		float Radius = 5.0f;
+		float LaunchSpeed = 600.0f;
+		float Pull = 981.0f;
+		float TopSpeed = 1100.0f;
+		/** Bounces: restitution, friction; below RestSpeed a ball rests, after RestTime s (or MaxBounces) it goes back. */
+		float Restitution = 0.72f;
+		float Friction = 0.08f;
+		float RestSpeed = 40.0f;
+		float RestTime = 0.5f;
+		float MaxBounces = 10.0f;
+		/** Seconds a burst ball takes to flatten on the face. */
+		float BurstTime = 0.12f;
+	};
+
+	FString FillPaintBall(FString Text, const FPaintBallConfig& C)
+	{
+		auto F = [](float V) { return FString::Printf(TEXT("%.4f"), V); };
+		Text.ReplaceInline(TEXT("$(SEED_F)"), *F(float(C.Seed) * 0.6180339f));
+		Text.ReplaceInline(TEXT("$(BALL_RADIUS)"), *F(C.Radius));
+		Text.ReplaceInline(TEXT("$(BALL_LAUNCH_SPEED)"), *F(C.LaunchSpeed));
+		Text.ReplaceInline(TEXT("$(BALL_PULL)"), *F(C.Pull));
+		Text.ReplaceInline(TEXT("$(BALL_TOP_SPEED)"), *F(C.TopSpeed));
+		Text.ReplaceInline(TEXT("$(BALL_RESTITUTION)"), *F(C.Restitution));
+		Text.ReplaceInline(TEXT("$(BALL_FRICTION)"), *F(C.Friction));
+		Text.ReplaceInline(TEXT("$(BALL_REST_SPEED)"), *F(C.RestSpeed));
+		Text.ReplaceInline(TEXT("$(BALL_REST_TIME)"), *F(C.RestTime));
+		Text.ReplaceInline(TEXT("$(BALL_MAX_BOUNCES)"), *F(C.MaxBounces));
+		Text.ReplaceInline(TEXT("$(BALL_BURST_TIME)"), *F(C.BurstTime));
+		Text.ReplaceInline(TEXT("$(KIND_TARGET)"), *F(RainShield::BoxProtected));
+		FString Boxes;
+		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		{
+			Boxes += FString::Printf(TEXT("\tBB_BOX(User.RainBox%dMin, User.RainBox%dMax, User.RainBox%dKind, User.RainBox%dFull)\n"), i, i, i, i);
+		}
+		Text.ReplaceInline(TEXT("$(BALL_BOX_TESTS)"), *Boxes);
+		return Text;
+	}
+
+	UMaterial* BuildPaintBlobMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_PaintBlob"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Opaque;
+		M->SetShadingModel(MSM_Unlit);
+		M->bUsedWithNiagaraMeshParticles = true;
+		UMaterialExpressionCustom* Custom = AddCustom(M, TEXT("Materials/HLSL/PaintBlob.hlsl"), CMOT_Float3);
+		UMaterialExpressionVertexNormalWS* Normal = AddExpr<UMaterialExpressionVertexNormalWS>(M, -900, -100);
+		AddCustomInput(Custom, TEXT("NormalWS"), Normal);
+		UMaterialExpressionCameraVectorWS* View = AddExpr<UMaterialExpressionCameraVectorWS>(M, -900, 0);
+		AddCustomInput(Custom, TEXT("ToCamera"), View);
+		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -900, 100);
+		AddCustomInput(Custom, TEXT("PColor"), PColor, 5);
+		M->GetEditorOnlyData()->EmissiveColor.Connect(0, Custom);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+}
+
+FString URainBuilderLibrary::BuildPaintBallAssets(int32 BallCount)
+{
+	FString Report;
+	UMaterial* Material = BuildPaintBlobMaterial(Report);
+	const FPaintBallConfig Config;
+	const FString ModPath = RainRoot / TEXT("Niagara/Modules");
+	UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_PaintBallSpawn"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallSpawn.hlsl")), Config),
+		TEXT("Paint Valley: paint balls waiting in the cloud"), ParticleModuleMask);
+	UNiagaraScript* Update = CreateHlslModule(ModPath, TEXT("NM_PaintBallUpdate"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallUpdate.hlsl")), Config),
+		TEXT("Paint Valley: paint balls fly, bounce and burst on the target"), ParticleModuleMask);
+	UNiagaraScript* Neighbors = CreateReaderModule(ModPath, TEXT("NM_PaintBallNeighbors"), FillPaintBall(LoadTextFile(TEXT("Niagara/HLSL/PaintBallNeighbors.hlsl")), Config),
+		TEXT("Paint Valley: paint balls find their nearest balls and collide with them"), ParticleModuleMask, Report);
+	SaveAsset(Spawn);
+	SaveAsset(Update);
+	if (Neighbors)
+	{
+		SaveAsset(Neighbors);
+	}
+	const FGameExportInputs Inputs = FindExportInputs(Report);
+
+	UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), TEXT("NS_PaintBalls"));
+	AddGameUserParameters(System, BallCount);
+	{
+		auto Add = [System](FNiagaraVariable Var) { Var.SetName(*(TEXT("User.") + Var.GetName().ToString())); AddUserParameter(System, Var); };
+		auto Float = [&Add](const TCHAR* Name, float V) { FNiagaraVariable Var(FNiagaraTypeDefinition::GetFloatDef(), Name); Var.SetValue(V); Add(Var); };
+		Float(TEXT("RainBallLeft"), 1.0f);
+		Float(TEXT("RainBallWait"), 6.0f);
+		Float(TEXT("RainBallEpoch"), 0.0f);
+		Float(TEXT("RainFreeze"), 0.0f);
+		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		{
+			Float(*FString::Printf(TEXT("RainBox%dFull"), i), 0.0f);
+		}
+		FNiagaraVariable Ink(FNiagaraTypeDefinition::GetColorDef(), TEXT("RainPaintInk"));
+		Ink.SetValue(FLinearColor(0.15f, 0.45f, 0.85f, 1.0f));
+		Add(Ink);
+	}
+
+	UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("PaintBalls"), false);
+	FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+	D->SimTarget = ENiagaraSimTarget::CPUSim;
+	D->bLocalSpace = false;
+	D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+	D->FixedBounds = FBox(FVector(-5000.0), FVector(5000.0));
+	UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+	SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+	UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+	const bool bCountLinked = LinkModuleInput(Burst, TEXT("Spawn Count"), FNiagaraTypeDefinition::GetIntDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetIntDef(), TEXT("User.RainGameCount")));
+	LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+
+	const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+	const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
+	TArray<FNiagaraVariable> Attributes = {
+		FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
+		FNiagaraVariable(V3, TEXT("Particles.Velocity")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
+		FNiagaraVariable(V3, TEXT("Particles.Scale")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetQuatDef(), TEXT("Particles.MeshOrientation")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetVec4Def(), TEXT("Particles.RainRand")),
+		FNiagaraVariable(F, TEXT("Particles.BallState")),
+		FNiagaraVariable(F, TEXT("Particles.BallTimer")),
+		FNiagaraVariable(F, TEXT("Particles.BallBounces")),
+		FNiagaraVariable(F, TEXT("Particles.BallSquash")),
+		FNiagaraVariable(F, TEXT("Particles.BallCycle")),
+		FNiagaraVariable(F, TEXT("Particles.BallEpoch")),
+		FNiagaraVariable(V3, TEXT("Particles.BallNormal")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.BallNear")),
+		FNiagaraVariable(F, TEXT("Particles.PaintKind")),
+		FNiagaraVariable(GameHitParam),
+		FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")),
+	};
+	TArray<FString> Defaults;
+	Defaults.SetNum(Attributes.Num());
+	AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
+	AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+	AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+	if (Neighbors)
+	{
+		AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Neighbors);
+	}
+	// After the update: the balls that burst on the target this frame (contact point, box kind as size, velocity).
+	const FNiagaraVariableBase Velocity(Inputs.VelocityType, TEXT("Particles.Velocity"));
+	const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(F, TEXT("Particles.PaintKind")), &Velocity);
+
+	UNiagaraMeshRendererProperties* Meshes = NewObject<UNiagaraMeshRendererProperties>(Emitter, TEXT("BallMeshes"));
+	Meshes->Meshes.SetNum(1);
+	Meshes->Meshes[0].Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	Meshes->bOverrideMaterials = true;
+	FNiagaraMeshMaterialOverride& Override = Meshes->OverrideMaterials.AddDefaulted_GetRef();
+	Override.ExplicitMat = Material;
+	Emitter->AddRenderer(Meshes, D->Version.VersionGuid);
+
+	FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
+	const bool bOk = CompileAndReport(System, Report);
+	SaveAsset(System);
+	Report += FString::Printf(TEXT("Emitter PaintBalls (CPU): User.RainGameCount balls (%s), %d boxes, burst export %s\n"),
 		bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), RainShield::MaxBoxes, bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
 	return FString::Printf(TEXT("%s\n%s"), bOk && !Report.Contains(TEXT("ERROR")) ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
 }

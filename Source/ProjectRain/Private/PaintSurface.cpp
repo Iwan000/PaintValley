@@ -138,8 +138,11 @@ void FPaintSurface::AddFace(FFace F)
 			T.P = FVector3f(P);
 			T.Face = Faces.Num();
 			T.bVisible = !F.Hole.Contains(Lu, Lv) && !Inside(P + F.N * 0.5, F.Skip);
-			// Downward faces never show in the isometric view at any yaw: painted, but not part of the score.
-			T.bTarget = B.Kind == EPaintBoxKind::Target && F.N.Z > -0.5;
+			// Only the target takes paint. Its downward faces never show in the isometric view at any yaw: painted,
+			// but not part of the score.
+			T.bPaintable = B.Kind == EPaintBoxKind::Target;
+			T.bTarget = T.bPaintable && F.N.Z > -0.5;
+			F.Scored += T.bVisible && T.bTarget ? 1 : 0;
 			T.Area = float((F.W / F.NU) * (F.H / F.NV));
 			F.Visible += T.bVisible ? 1 : 0;
 			Texels.Add(T);
@@ -340,10 +343,13 @@ int32 FPaintSurface::Build(const TArray<FPaintBox>& InBoxes, const TArray<FPaint
 	TargetArea = 0.0;
 	TargetPainted = 0.0;
 	Field.Init(0.0f, Texels.Num());
+	Grow.Init(0.0f, Texels.Num());
+	Reach.Init(UE_BIG_NUMBER, Texels.Num());
+	BodyOf.Init(INDEX_NONE, Texels.Num());
+	Painted.Init(false, Texels.Num());
 	Puddles.Reset();
 	Growing.Reset();
-	PuddleHash.Reset();
-	MaxEdge = 0.0f;
+	FeedClock = 0.0f;
 	Hash.Reset();
 	DirtyFaces.Reset();
 	for (int32 t = 0; t < Texels.Num(); ++t)
@@ -627,88 +633,389 @@ FIntVector FPaintSurface::HashCell(const FVector& P) const
 	return FIntVector(FMath::FloorToInt(P.X / HashSize), FMath::FloorToInt(P.Y / HashSize), FMath::FloorToInt(P.Z / HashSize));
 }
 
-FIntVector FPaintSurface::PuddleCell(const FVector& P) const
-{
-	return FIntVector(FMath::FloorToInt(P.X / PuddleCellSize), FMath::FloorToInt(P.Y / PuddleCellSize), FMath::FloorToInt(P.Z / PuddleCellSize));
-}
-
 void FPaintSurface::AddPuddle(const FVector& At, float Radius, const FVector& Dir)
 {
 	FPuddle P;
 	P.At = At;
 	P.In = Dir.GetSafeNormal();
 	P.Full = Radius / EdgeShare;
-	P.bGrowing = true;
-	const int32 Index = Puddles.Add(P);
-	PuddleHash.FindOrAdd(PuddleCell(At)).Add(Index);
-	Growing.Add(Index);
-	MaxEdge = FMath::Max(MaxEdge, Radius);
+	Growing.Add(Puddles.Add(P));
 }
 
-bool FPaintSurface::Feed(const FVector& At, float Weight)
+int32 FPaintSurface::TexelAt(const FVector& At) const
 {
-	// The puddle whose edge the drop lands deepest inside (distance over its current edge radius).
-	int32 Best = INDEX_NONE;
-	float BestShare = 1.05f;
-	const FIntVector C0 = PuddleCell(At - FVector(MaxEdge)), C1 = PuddleCell(At + FVector(MaxEdge));
+	float Best = FMath::Square(1.5f * TexelSize);
+	int32 Found = INDEX_NONE;
+	const FIntVector C0 = HashCell(At - FVector(1.5f * TexelSize)), C1 = HashCell(At + FVector(1.5f * TexelSize));
 	for (int32 z = C0.Z; z <= C1.Z; ++z)
 	{
 		for (int32 y = C0.Y; y <= C1.Y; ++y)
 		{
 			for (int32 x = C0.X; x <= C1.X; ++x)
 			{
-				if (const TArray<int32>* Cell = PuddleHash.Find(FIntVector(x, y, z)))
+				if (const TArray<int32>* Cell = Hash.Find(FIntVector(x, y, z)))
 				{
-					for (const int32 i : *Cell)
+					for (const int32 t : *Cell)
 					{
-						const FPuddle& P = Puddles[i];
-						const float Edge = FMath::Max(P.Now * EdgeShare, 0.5f);
-						const float Share = float((At - P.At).Size()) / Edge;
-						if (Share < BestShare)
+						const float D2 = float((FVector(Texels[t].P) - At).SizeSquared());
+						if (Texels[t].bPaintable && D2 < Best)
 						{
-							BestShare = Share;
-							Best = i;
+							Best = D2;
+							Found = t;
 						}
 					}
 				}
 			}
 		}
 	}
-	if (Best == INDEX_NONE)
+	return Found;
+}
+
+bool FPaintSurface::Feed(const FVector& At, float Area)
+{
+	// On paint: where it shows (also where puddles have flowed together, beyond each one's own circle). The body it
+	// feeds is found when the face regroups.
+	const int32 t = TexelAt(At);
+	if (t == INDEX_NONE || !Painted[t])
 	{
 		return false;
 	}
-	Puddles[Best].Pending += Weight * FeedArea;
+	Faces[Texels[t].Face].Feeds.Emplace(t, Area);
 	return true;
+}
+
+bool FPaintSurface::IsSettled() const
+{
+	if (Growing.Num() > 0)
+	{
+		return false;
+	}
+	for (const FFace& F : Faces)
+	{
+		if (F.Feeds.Num() > 0 || F.bGrowing || F.bOwed)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool FPaintSurface::Show(int32 t)
+{
+	const FTexel& T = Texels[t];
+	const float V = FMath::Max(Field[t], Grow[t]);
+	bool bNew = false;
+	if (!Painted[t] && V >= PaintLevel)
+	{
+		Painted[t] = true;
+		bNew = true;
+		if (T.bTarget)
+		{
+			TargetPainted += T.Area;
+			++Faces[T.Face].Painted;
+		}
+	}
+	// 0.25 on the edge, 1 where the paint is four times as deep (the material shades the depth).
+	const uint8 B = ToByte(FMath::Min(1.0f, 0.25f * V / PaintLevel));
+	if (B != Values[t].R)
+	{
+		Values[t].R = B;
+		DirtyFaces.Add(T.Face);
+	}
+	return bNew;
+}
+
+void FPaintSurface::Regroup(int32 FaceIndex)
+{
+	FFace& F = Faces[FaceIndex];
+	const int32 N = F.NU * F.NV;
+	const float Du = F.W / F.NU, Dv = F.H / F.NV;
+	auto Usable = [this](int32 t) { return Texels[t].bPaintable && Texels[t].bVisible; };
+	auto Pos = [Du, Dv, &F](int32 k) { return FVector2f((k % F.NU + 0.5f) * Du, (k / F.NU + 0.5f) * Dv); };
+
+	// The paint fed and not shown yet (found again by a texel of its body), then the growth so far baked in.
+	TArray<TPair<int32, float>> Owed;
+	for (const FBody& B : F.Bodies)
+	{
+		if (B.Fed > B.Gained)
+		{
+			Owed.Emplace(B.Rep, B.Fed - B.Gained);
+		}
+	}
+	F.bOwed = false;
+	for (int32 k = 0; k < N; ++k)
+	{
+		const int32 t = F.First + k;
+		Field[t] = FMath::Max(Field[t], Grow[t]);
+		Grow[t] = 0.0f;
+		Reach[t] = UE_BIG_NUMBER;
+		BodyOf[t] = INDEX_NONE;
+	}
+	// Inside a body (painted all round) the paint is made solid: an old outline the growth closed over stays just
+	// at the paint level otherwise, where the edge's noise would open pinholes. The outline's own texels are left
+	// alone, so it keeps its place.
+	for (int32 k = 0; k < N; ++k)
+	{
+		const int32 t = F.First + k;
+		const int32 i = k % F.NU, j = k / F.NU;
+		if (Painted[t] && i > 0 && j > 0 && i + 1 < F.NU && j + 1 < F.NV && Painted[t - 1] && Painted[t + 1] && Painted[t - F.NU] && Painted[t + F.NU]
+			&& Field[t] < SolidLevel * PaintLevel)
+		{
+			Field[t] = SolidLevel * PaintLevel;
+			Show(t);
+		}
+	}
+
+	// Bodies: the painted texels joined edge to edge.
+	F.Bodies.Reset();
+	TArray<int32> Stack;
+	for (int32 k = 0; k < N; ++k)
+	{
+		const int32 t0 = F.First + k;
+		if (!Painted[t0] || BodyOf[t0] != INDEX_NONE)
+		{
+			continue;
+		}
+		const int32 b = F.Bodies.AddDefaulted();
+		F.Bodies[b].Rep = t0;
+		BodyOf[t0] = b;
+		Stack.Add(k);
+		while (Stack.Num() > 0)
+		{
+			const int32 c = Stack.Pop(EAllowShrinking::No);
+			const int32 i = c % F.NU, j = c / F.NU;
+			const int32 Next[4] = { i > 0 ? c - 1 : -1, i + 1 < F.NU ? c + 1 : -1, j > 0 ? c - F.NU : -1, j + 1 < F.NV ? c + F.NU : -1 };
+			for (const int32 n : Next)
+			{
+				if (n >= 0 && Painted[F.First + n] && BodyOf[F.First + n] == INDEX_NONE)
+				{
+					BodyOf[F.First + n] = b;
+					Stack.Add(n);
+				}
+			}
+		}
+	}
+
+	// What each body is owed and fed. Only those bodies move, so only they claim the bare texels around them (an unfed
+	// body claiming ground would hold a fed one back for good).
+	TArray<float> Area;
+	Area.SetNumZeroed(F.Bodies.Num());
+	for (const TPair<int32, float>& O : Owed)
+	{
+		if (BodyOf[O.Key] != INDEX_NONE)
+		{
+			Area[BodyOf[O.Key]] += O.Value;
+		}
+	}
+	for (const TPair<int32, float>& Fd : F.Feeds)
+	{
+		if (BodyOf[Fd.Key] != INDEX_NONE)
+		{
+			Area[BodyOf[Fd.Key]] += Fd.Value;
+		}
+	}
+
+	// The outline: between each bare texel and a painted neighbour, where the paint crosses its level (so the outline
+	// keeps its place between texels). Each such pair is a piece of perimeter (pi / 4: the steps of a grid outline
+	// against a smooth one, on average over directions). Nearest outline points then spread over the bare texels in
+	// two sweeps (dead reckoning), each with the body it belongs to.
+	TArray<FVector2f> Near;
+	Near.SetNumZeroed(N);
+	for (int32 k = 0; k < N; ++k)
+	{
+		const int32 t = F.First + k;
+		if (Painted[t] || !Usable(t))
+		{
+			continue;
+		}
+		const int32 i = k % F.NU, j = k / F.NU;
+		const int32 Next[4] = { i > 0 ? k - 1 : -1, i + 1 < F.NU ? k + 1 : -1, j > 0 ? k - F.NU : -1, j + 1 < F.NV ? k + F.NU : -1 };
+		for (int32 d = 0; d < 4; ++d)
+		{
+			const int32 n = Next[d];
+			if (n < 0 || !Painted[F.First + n] || Area[BodyOf[F.First + n]] <= 0.0f)
+			{
+				continue;
+			}
+			const float Vp = Field[F.First + n], Vu = Field[t];
+			const float A = FMath::Clamp((Vp - PaintLevel) / FMath::Max(Vp - Vu, 1e-6f), 0.0f, 1.0f);
+			const FVector2f Edge = Pos(n) + (Pos(k) - Pos(n)) * A;
+			const float Dist = (Pos(k) - Edge).Size();
+			F.Bodies[BodyOf[F.First + n]].Perimeter += (d < 2 ? Dv : Du) * (UE_PI / 4.0f);
+			if (Dist < Reach[t])
+			{
+				Reach[t] = Dist;
+				Near[k] = Edge;
+				BodyOf[t] = BodyOf[F.First + n];
+			}
+		}
+	}
+	auto Try = [&](int32 k, int32 i, int32 j)
+	{
+		if (i < 0 || j < 0 || i >= F.NU || j >= F.NV)
+		{
+			return;
+		}
+		const int32 n = j * F.NU + i;
+		const int32 tn = F.First + n, t = F.First + k;
+		if (Painted[tn] || Reach[tn] >= UE_BIG_NUMBER)
+		{
+			return;
+		}
+		const float Dist = (Pos(k) - Near[n]).Size();
+		if (Dist < Reach[t])
+		{
+			Reach[t] = Dist;
+			Near[k] = Near[n];
+			BodyOf[t] = BodyOf[tn];
+		}
+	};
+	auto Bare = [&](int32 k) { return !Painted[F.First + k] && Usable(F.First + k); };
+	for (int32 j = 0; j < F.NV; ++j)
+	{
+		for (int32 i = 0; i < F.NU; ++i)
+		{
+			const int32 k = j * F.NU + i;
+			if (Bare(k)) { Try(k, i - 1, j); Try(k, i, j - 1); Try(k, i - 1, j - 1); Try(k, i + 1, j - 1); }
+		}
+		for (int32 i = F.NU - 1; i >= 0; --i)
+		{
+			const int32 k = j * F.NU + i;
+			if (Bare(k)) { Try(k, i + 1, j); }
+		}
+	}
+	for (int32 j = F.NV - 1; j >= 0; --j)
+	{
+		for (int32 i = F.NU - 1; i >= 0; --i)
+		{
+			const int32 k = j * F.NU + i;
+			if (Bare(k)) { Try(k, i + 1, j); Try(k, i, j + 1); Try(k, i + 1, j + 1); Try(k, i - 1, j + 1); }
+		}
+		for (int32 i = 0; i < F.NU; ++i)
+		{
+			const int32 k = j * F.NU + i;
+			if (Bare(k)) { Try(k, i - 1, j); }
+		}
+	}
+
+	// Its whole outline moves out by that area over its perimeter.
+	F.Feeds.Reset();
+	F.bGrowing = false;
+	for (int32 b = 0; b < F.Bodies.Num(); ++b)
+	{
+		FBody& B = F.Bodies[b];
+		if (Area[b] > 0.0f && B.Perimeter > 0.0f)
+		{
+			B.GrowTo = Area[b] / B.Perimeter;
+			B.Fed = Area[b];
+			F.bGrowing = true;
+		}
+	}
+}
+
+void FPaintSurface::GrowFace(int32 FaceIndex, float Step)
+{
+	FFace& F = Faces[FaceIndex];
+	bool bMoving = false;
+	for (FBody& B : F.Bodies)
+	{
+		B.GrowNow += (B.GrowTo - B.GrowNow) * Step;
+		if (B.GrowTo - B.GrowNow < 0.01f)
+		{
+			B.GrowNow = B.GrowTo;
+		}
+		else
+		{
+			bMoving = true;
+		}
+	}
+	// A bare texel shows its body's paint once the outline passes it, deepening over GrowRamp cm behind the outline
+	// (and rising towards it ahead of the outline, so the outline lies between texels).
+	// Only fed bodies move (an unfed one would grow a faint rim ahead of its outline).
+	for (int32 k = 0; k < F.NU * F.NV; ++k)
+	{
+		const int32 t = F.First + k;
+		const int32 b = BodyOf[t];
+		if (b == INDEX_NONE || Reach[t] >= UE_BIG_NUMBER || F.Bodies[b].GrowTo <= 0.0f)
+		{
+			continue;
+		}
+		const float G = F.Bodies[b].GrowNow;
+		if (Reach[t] >= G + GrowRamp)
+		{
+			continue;
+		}
+		const float Paint = FMath::Clamp(PaintLevel * (1.0f + (G - Reach[t]) / GrowRamp), 0.0f, 3.0f * PaintLevel);
+		if (Paint > Grow[t])
+		{
+			Grow[t] = Paint;
+			if (Show(t))
+			{
+				F.Bodies[b].Gained += Texels[t].Area;
+			}
+		}
+	}
+	F.bGrowing = bMoving;
+	if (!bMoving)
+	{
+		// Done moving: an outline held back owes the rest (worth regrouping for at least two texels' paint), as long as
+		// it got somewhere this time (a body that can no longer grow on this face drops its debt).
+		for (const FBody& B : F.Bodies)
+		{
+			F.bOwed = F.bOwed || (B.Perimeter > 0.0f && B.Fed - B.Gained > 2.0f * TexelSize * TexelSize && B.Gained > 0.0f);
+		}
+	}
+}
+
+TArray<int32> FPaintSurface::CollisionBoxIndices() const
+{
+	TArray<int32> Out;
+	for (int32 b = 0; b < Boxes.Num(); ++b)
+	{
+		if (Boxes[b].bCollide)
+		{
+			Out.Add(b);
+		}
+	}
+	return Out;
+}
+
+int32 FPaintSurface::FullFaces(int32 Box) const
+{
+	// Start with every face full; clear the bit of each face of this box that still takes paint.
+	int32 Mask = 63;
+	for (const FFace& F : Faces)
+	{
+		if (F.Box != Box || F.Hole.bValid || F.Scored == 0)
+		{
+			continue;
+		}
+		const int32 Bit = F.N.X > 0.5 ? 1 : F.N.X < -0.5 ? 2 : F.N.Y > 0.5 ? 4 : F.N.Y < -0.5 ? 8 : F.N.Z > 0.5 ? 16 : 32;
+		if (float(F.Painted) < FullShare * F.Scored)
+		{
+			Mask &= ~Bit;
+		}
+	}
+	return Mask;
 }
 
 void FPaintSurface::Tick(float DeltaSeconds)
 {
-	// Fed growth, in batches: the edge radius grows so the puddle's area grows by what it was fed.
+	// Fed growth, in batches: the faces fed since the last batch regroup and set their outlines moving.
 	FeedClock += DeltaSeconds;
 	if (FeedClock >= FeedPeriod)
 	{
 		FeedClock = 0.0f;
-		for (int32 i = 0; i < Puddles.Num(); ++i)
+		for (int32 f = 0; f < Faces.Num(); ++f)
 		{
-			FPuddle& P = Puddles[i];
-			if (P.Pending <= 0.0f)
+			if (Faces[f].Feeds.Num() > 0 || (Faces[f].bOwed && !Faces[f].bGrowing))
 			{
-				continue;
-			}
-			const float Edge = P.Full * EdgeShare;
-			const float Grown = FMath::Sqrt(Edge * Edge + P.Pending / UE_PI);
-			P.Full = Grown / EdgeShare;
-			P.Pending = 0.0f;
-			MaxEdge = FMath::Max(MaxEdge, Grown);
-			if (!P.bGrowing)
-			{
-				P.bGrowing = true;
-				Growing.Add(i);
+				Regroup(f);
 			}
 		}
 	}
-	// Spreading: the kernel radius approaches its size as 1 - exp(-t / SpreadTime), stamped every 0.25 cm.
+	// Spreading: the kernel radius approaches its size as 1 - exp(-t / SpreadTime), stamped every 0.25 cm; the
+	// outlines move the same way.
 	const float Step = 1.0f - FMath::Exp(-DeltaSeconds / SpreadTime);
 	for (int32 g = Growing.Num() - 1; g >= 0; --g)
 	{
@@ -723,13 +1030,19 @@ void FPaintSurface::Tick(float DeltaSeconds)
 		}
 		if (bDone)
 		{
-			P.bGrowing = false;
 			Growing.RemoveAtSwap(g);
+		}
+	}
+	for (int32 f = 0; f < Faces.Num(); ++f)
+	{
+		if (Faces[f].bGrowing)
+		{
+			GrowFace(f, Step);
 		}
 	}
 }
 
-void FPaintSurface::Spread(const FVector& At, const FVector& In, float From, float To)
+void FPaintSurface::Spread(const FVector& At, const FVector& In, float From, float To, float Height)
 {
 	if (To <= From)
 	{
@@ -751,8 +1064,8 @@ void FPaintSurface::Spread(const FVector& At, const FVector& In, float From, flo
 				for (const int32 t : *Cell)
 				{
 					const FTexel& T = Texels[t];
-					// Faces turned away from the rain stay dry (no paint through a wall's back).
-					if (FVector::DotProduct(Faces[T.Face].N, In) > 0.35)
+					// Only the target takes paint, and not on faces turned away from the rain (no paint through a wall).
+					if (!T.bPaintable || FVector::DotProduct(Faces[T.Face].N, In) > 0.35)
 					{
 						continue;
 					}
@@ -761,18 +1074,8 @@ void FPaintSurface::Spread(const FVector& At, const FVector& In, float From, flo
 					{
 						continue;
 					}
-					const float Before = Field[t];
-					Field[t] += Bump(D, To) - Bump(D, From);
-					if (Before < PaintLevel && Field[t] >= PaintLevel)
-					{
-						TargetPainted += T.bTarget ? T.Area : 0.0;
-					}
-					const uint8 V = ToByte(FMath::Min(1.0f, 0.5f * Field[t] / PaintLevel));
-					if (V != Values[t].R)
-					{
-						Values[t].R = V;
-						DirtyFaces.Add(T.Face);
-					}
+					Field[t] += Height * (Bump(D, To) - Bump(D, From));
+					Show(t);
 				}
 			}
 		}
@@ -790,10 +1093,20 @@ void FPaintSurface::ClearPaint()
 		}
 	}
 	Field.Init(0.0f, Texels.Num());
+	Grow.Init(0.0f, Texels.Num());
+	Reach.Init(UE_BIG_NUMBER, Texels.Num());
+	BodyOf.Init(INDEX_NONE, Texels.Num());
+	Painted.Init(false, Texels.Num());
 	Puddles.Reset();
 	Growing.Reset();
-	PuddleHash.Reset();
-	MaxEdge = 0.0f;
+	for (FFace& F : Faces)
+	{
+		F.Painted = 0;
+		F.Bodies.Reset();
+		F.Feeds.Reset();
+		F.bGrowing = false;
+		F.bOwed = false;
+	}
 	FeedClock = 0.0f;
 	TargetPainted = 0.0;
 }

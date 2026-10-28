@@ -24,6 +24,7 @@
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "ViewModels/Stack/NiagaraParameterHandle.h"
 #include "NiagaraScriptVariable.h"
+#include "NiagaraDataInterfaceParticleRead.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRainAuthoring, Log, All);
 
@@ -120,6 +121,127 @@ namespace RainAuthoring
 		}
 		Graph->NotifyGraphChanged();
 
+		FAssetRegistryModule::AssetCreated(Script);
+		Script->MarkPackageDirty();
+		return Script;
+	}
+
+	UNiagaraScript* CreateReaderModule(const FString& PackagePath, const FString& AssetName, const FString& Hlsl,
+		const FString& Description, int32 ModuleUsageBitmask, FString& Report)
+	{
+		UNiagaraScript* Stock = LoadObject<UNiagaraScript>(nullptr, TEXT("/Niagara/Modules/Update/Neighbor/CalculateNeighbors.CalculateNeighbors"));
+		if (!Stock)
+		{
+			Report += TEXT("  ERROR: no stock CalculateNeighbors module\n");
+			return nullptr;
+		}
+		UPackage* Package = PreparePackage(PackagePath, AssetName);
+		UNiagaraScript* Script = DuplicateObject<UNiagaraScript>(Stock, Package, *AssetName);
+		Script->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+		if (FVersionedNiagaraScriptData* Data = Script->GetLatestScriptData())
+		{
+			Data->ModuleUsageBitmask = ModuleUsageBitmask;
+			Data->Description = FText::FromString(Description);
+			Data->Category = FText::FromString(TEXT("Project Rain"));
+			Data->LibraryVisibility = ENiagaraScriptLibraryVisibility::Library;
+		}
+		UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+		UNiagaraGraph* Graph = Source ? Source->NodeGraph : nullptr;
+		if (!Graph)
+		{
+			Report += TEXT("  ERROR: the duplicated module has no graph\n");
+			return nullptr;
+		}
+		const UEdGraphSchema_Niagara* Schema = CastChecked<UEdGraphSchema_Niagara>(Graph->GetSchema());
+
+		// The pieces kept: the output, the map input, the map-get that reads the module's reader input, and the input
+		// node holding the reader's default.
+		UNiagaraNodeOutput* OutputNode = nullptr;
+		UNiagaraNodeInput* MapNode = nullptr;
+		UNiagaraNodeInput* ReaderDefault = nullptr;
+		UEdGraphPin* ReaderPin = nullptr;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (UNiagaraNodeOutput* O = Cast<UNiagaraNodeOutput>(Node))
+			{
+				OutputNode = O;
+			}
+			else if (UNiagaraNodeInput* I = Cast<UNiagaraNodeInput>(Node))
+			{
+				if (I->Input.GetType() == FNiagaraTypeDefinition::GetParameterMapDef())
+				{
+					MapNode = I;
+				}
+				else if (I->Input.GetType().GetClass() && I->Input.GetType().GetClass()->IsChildOf(UNiagaraDataInterfaceParticleRead::StaticClass()))
+				{
+					ReaderDefault = I;
+				}
+			}
+			else if (Node->GetClass()->GetName() == TEXT("NiagaraNodeParameterMapGet"))
+			{
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					const FString Name = Pin->PinName.ToString();
+					if (Pin->Direction == EGPD_Output && Name.StartsWith(TEXT("Module.")) && Name.EndsWith(TEXT("AttributeReader")))
+					{
+						ReaderPin = Pin;
+					}
+				}
+			}
+		}
+		if (!OutputNode || !MapNode || !ReaderPin)
+		{
+			Report += FString::Printf(TEXT("  ERROR: CalculateNeighbors' graph changed (output %p, map %p, reader %p)\n"), OutputNode, MapNode, ReaderPin);
+			return nullptr;
+		}
+		UEdGraphPin* MapOut = FindPinByDir(MapNode, EGPD_Output);
+		// The reader's map-get reads straight from the input map.
+		for (UEdGraphPin* Pin : ReaderPin->GetOwningNode()->Pins)
+		{
+			if (Pin->Direction == EGPD_Input && UEdGraphSchema_Niagara::PinToTypeDefinition(Pin) == FNiagaraTypeDefinition::GetParameterMapDef())
+			{
+				Schema->BreakPinLinks(*Pin, false);
+				Schema->TryCreateConnection(MapOut, Pin);
+			}
+		}
+
+		FGraphNodeCreator<UNiagaraNodeCustomHlsl> HlslCreator(*Graph);
+		UNiagaraNodeCustomHlsl* HlslNode = HlslCreator.CreateNode();
+		HlslNode->ScriptUsage = ENiagaraScriptUsage::Module;
+		HlslNode->Signature.Name = *AssetName;
+		HlslNode->Signature.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("Map")));
+		HlslNode->Signature.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition(UNiagaraDataInterfaceParticleRead::StaticClass()), TEXT("Reader")));
+		HlslNode->Signature.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("MapOut")));
+		FStrProperty* HlslProp = FindFProperty<FStrProperty>(UNiagaraNodeCustomHlsl::StaticClass(), TEXT("CustomHlsl"));
+		if (HlslProp)
+		{
+			HlslProp->SetPropertyValue_InContainer(HlslNode, Hlsl);
+		}
+		HlslCreator.Finalize();
+		UEdGraphPin* OutIn = FindPinByDir(OutputNode, EGPD_Input);
+		Schema->BreakPinLinks(*OutIn, false);
+		const bool bLinked = Schema->TryCreateConnection(MapOut, FindPinByDir(HlslNode, EGPD_Input, TEXT("Map")))
+			&& Schema->TryCreateConnection(ReaderPin, FindPinByDir(HlslNode, EGPD_Input, TEXT("Reader")))
+			&& Schema->TryCreateConnection(FindPinByDir(HlslNode, EGPD_Output, TEXT("MapOut")), OutIn);
+		if (HlslProp)
+		{
+			FPropertyChangedEvent Event(HlslProp);
+			HlslNode->PostEditChangeProperty(Event);
+		}
+		// The reader reads the emitter it runs in.
+		// (UNiagaraNodeInput::GetDataInterface is not exported: its property, by reflection.)
+		UNiagaraDataInterfaceParticleRead* Reader = nullptr;
+		if (FObjectPropertyBase* Prop = ReaderDefault ? FindFProperty<FObjectPropertyBase>(UNiagaraNodeInput::StaticClass(), TEXT("DataInterface")) : nullptr)
+		{
+			Reader = Cast<UNiagaraDataInterfaceParticleRead>(Prop->GetObjectPropertyValue_InContainer(ReaderDefault));
+		}
+		if (Reader)
+		{
+			Reader->EmitterBinding.BindingMode = ENiagaraDataInterfaceEmitterBindingMode::Self;
+		}
+		Report += FString::Printf(TEXT("  reader module %s: %s, default reader %s\n"), *AssetName, bLinked ? TEXT("linked") : TEXT("ERROR: NOT LINKED"),
+			Reader ? TEXT("bound to self") : TEXT("ERROR: missing"));
+		Graph->NotifyGraphChanged();
 		FAssetRegistryModule::AssetCreated(Script);
 		Script->MarkPackageDirty();
 		return Script;

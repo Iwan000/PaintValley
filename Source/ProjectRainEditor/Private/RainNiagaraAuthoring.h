@@ -20,6 +20,13 @@ namespace RainAuthoring
 	UNiagaraScript* CreateHlslModule(const FString& PackagePath, const FString& AssetName, const FString& Hlsl,
 		const FString& Description, int32 ModuleUsageBitmask);
 
+	/** Like CreateHlslModule, with a second input: Reader, a Particle Attribute Reader bound to the emitter the module
+	 *  runs in (it reads the previous frame's particles). Module graphs reach a data interface through a map-get node,
+	 *  whose class the engine does not export: the module is duplicated from the engine's CalculateNeighbors (which
+	 *  has that chain) and its graph rewired to InputMap -> CustomHlsl(Map, Reader / MapOut) -> Output. */
+	UNiagaraScript* CreateReaderModule(const FString& PackagePath, const FString& AssetName, const FString& Hlsl,
+		const FString& Description, int32 ModuleUsageBitmask, FString& Report);
+
 	/** A transient emitter initialised with empty spawn/update stacks (no default modules or renderers). */
 	UNiagaraEmitter* CreateEmptyEmitter(const FString& Name, bool bAddDefaultModulesAndRenderers = false);
 

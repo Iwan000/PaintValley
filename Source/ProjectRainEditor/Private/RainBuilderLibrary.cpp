@@ -4,6 +4,10 @@
 #include "NiagaraEmitter.h"
 #include "NiagaraSystem.h"
 #include "NiagaraScript.h"
+#include "NiagaraScriptSource.h"
+#include "NiagaraGraph.h"
+#include "NiagaraNodeCustomHlsl.h"
+#include "EdGraphSchema_Niagara.h"
 #include "NiagaraNodeFunctionCall.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraSpriteRendererProperties.h"
@@ -210,4 +214,38 @@ FString URainBuilderLibrary::BuildDiagSystem(const FString& Name, const FString&
 	const bool bOk = CompileAndReport(System, Report);
 	SaveAsset(System);
 	return FString::Printf(TEXT("%s %s\n%s"), bOk ? TEXT("SUCCESS") : TEXT("FAILED"), *System->GetPathName(), *Report);
+}
+
+FString URainBuilderLibrary::DumpNiagaraScriptGraph(const FString& ObjectPath)
+{
+	UNiagaraScript* Script = LoadObject<UNiagaraScript>(nullptr, *ObjectPath);
+	UNiagaraScriptSource* Source = Script ? Cast<UNiagaraScriptSource>(Script->GetLatestSource()) : nullptr;
+	if (!Source || !Source->NodeGraph)
+	{
+		return TEXT("no graph");
+	}
+	FString Out;
+	for (UEdGraphNode* Node : Source->NodeGraph->Nodes)
+	{
+		Out += FString::Printf(TEXT("NODE %s %s\n"), *Node->GetClass()->GetName(), *Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			FString Links;
+			for (UEdGraphPin* L : Pin->LinkedTo)
+			{
+				Links += FString::Printf(TEXT(" -> %s.%s"), *L->GetOwningNode()->GetClass()->GetName(), *L->PinName.ToString());
+			}
+			const FNiagaraTypeDefinition Type = UEdGraphSchema_Niagara::PinToTypeDefinition(Pin);
+			Out += FString::Printf(TEXT("  %s %s [%s]%s%s\n"), Pin->Direction == EGPD_Input ? TEXT("in ") : TEXT("out"), *Pin->PinName.ToString(),
+				*Type.GetName(), *Links, Pin->bHidden ? TEXT(" hidden") : TEXT(""));
+		}
+		if (UNiagaraNodeCustomHlsl* Custom = Cast<UNiagaraNodeCustomHlsl>(Node))
+		{
+			if (FStrProperty* Prop = FindFProperty<FStrProperty>(UNiagaraNodeCustomHlsl::StaticClass(), TEXT("CustomHlsl")))
+			{
+				Out += TEXT("  HLSL:\n") + Prop->GetPropertyValue_InContainer(Custom) + TEXT("\n");
+			}
+		}
+	}
+	return Out;
 }
