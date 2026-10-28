@@ -15,3 +15,6 @@ Renders/*.mp4
 
 # Downloaded source art (the imported .uasset in Content/ carries it); see Scripts/import_backdrop.py.
 SourceArt/
+
+# Personal notes and the Chinese copies of the docs (not published).
+Notes/

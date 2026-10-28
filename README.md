@@ -178,216 +178,216 @@ On this Mac: `Scripts/sweep.sh rain|hail|hailgpu` (closes the editor first, prin
 | `Source/ProjectRainEditor/Private/RainAssetBuilder.cpp` | Builds every Niagara system, module and material from the HLSL above (`BuildRainGameAssets`, `BuildRainHailAssets`) |
 | `Source/ProjectRain/Private/RainMagicController.cpp` | The film rain's controller. In the game it supplies the drops' camera, lens and lamp inputs (`ExtraRainComponents`, `bGameMode`) |
 
-The rest of this README documents the original *Project Rain* (the film's rain-stopping trick, in Chinese).
+The rest of this README documents the original *Project Rain* (the film's rain-stopping trick).
 
 ---
 
 # Project Rain
 
-用 UE 5.7 Niagara 从零复刻《惊天魔盗团2》（*Now You See Me 2*，2016）终场里 J. Daniel Atlas 的控雨魔术：雨在半空停住、悬停、被手势拨动、乱舞、升回天空，最后重新落下。目标是粒子效果本身，舞台只为雨提供灯光和背景。
+A from-scratch recreation in UE 5.7 Niagara of J. Daniel Atlas's rain trick from the finale of *Now You See Me 2* (2016): the rain stops in mid-air, hovers, is pushed around by his gestures, swirls, rises back into the sky and finally falls again. The goal is the particle effect itself; the stage only gives the rain its lights and a background.
 
-效果分两层：
+The effect has two layers:
 
-1. **雨的真实感**：雨滴尺寸与下落速度、能量守恒的运动模糊条纹、球透镜折射、灯光前向散射、阵风、溅水、湿地面。
-2. **控制雨滴**：停雨波、悬停微漂移、手势影响场、混沌乱舞、抬升离场、恢复降雨；在 PIE 里还可以用键盘和鼠标亲手控制。
+1. **Realistic rain:** drop sizes and fall speeds, energy-conserving motion-blur streaks, ball-lens refraction, forward scattering of the lights, gusts, splashes, a wet ground.
+2. **Controlling the rain:** the stop wave, a slight drift while hovering, a gesture influence field, chaotic swirling, lifting away, and the rain resuming. In PIE you can also control it yourself with the keyboard and mouse.
 
-雨是一个跟着相机走的无限雨场（见下文"雨场"）：相机永远站在雨里，镜头前有大雨滴，远处有细小雨点，近大远小全靠透视自然产生。表演者周围另有一团"造雨塔"的大雨滴。
+The rain is an infinite rain field that follows the camera (see "The rain field" below): the camera always stands in the rain, with big drops in front of the lens and small ones in the distance; near-large, far-small comes from perspective alone. Around the performer there is also a cluster of big drops from the "rain towers".
 
-v9 的重点是让停住的雨读起来像水，而不是满屏发光的白点：
-- 水是透明的，只有折射出背后的景物才像水。所以加了一张城市雨夜的 HDR 全景图作背景，雨珠里折射出倒过来的街景。
-- 用摄影机的真实镜头参数做景深：离焦的雨滴变淡变软，不会变亮。
-- 雨滴是扁圆、会轻微晃动的水珠，中间有一个亮芯。
-- 换成了能凸显雨的机位，PIE 里按 `V` 切换。
+v9 focuses on making the stopped rain read as water rather than a screen full of glowing white dots:
+- Water is transparent; it only looks like water when it refracts what is behind it. So an HDR panorama of a city on a rainy night was added as the background, and every drop shows the street upside down.
+- Depth of field uses the camera's real lens settings: defocused drops get fainter and softer, not brighter.
+- The drops are flattened, slightly wobbling beads of water with a bright core.
+- New camera positions that show off the rain; press `V` in PIE to cycle them.
 
-PIE 截图对比：`Renders/v9_pie_sheet.jpg`（v8 与 v9 同视角、四个新机位、下雨、乱舞）。`Renders/v9_hover_static_hero.mp4` 是主机位固定不动、悬停 4 秒的片段（MRQ），用来看有没有频闪和闪烁：整体亮度逐帧变化在 0.1% 以内，逐像素的变化都是雨滴被手势缓慢拨动的轨迹。成片仍是 v8 的 `Renders/RainTrick_v8.mp4`（46 秒，23.976 fps，2.39:1），镜头序列还没有按 v9 的机位重做。v6–v8 的成片和帧图都保留在 `Renders/` 下；从 v8 起每个版本在 git 里打了标签（`git checkout v8`）。
+PIE screenshot comparison: `Renders/v9_pie_sheet.jpg` (v8 and v9 from the same view, the four new cameras, rain, chaos). `Renders/v9_hover_static_hero.mp4` is a clip (MRQ) of a 4 s hover from the fixed hero camera, to check for strobing and flicker: the overall brightness changes by less than 0.1 % from frame to frame, and the per-pixel changes are the tracks of drops slowly pushed by the hand. The finished film is still v8's `Renders/RainTrick_v8.mp4` (46 s, 23.976 fps, 2.39:1); the shot sequence has not been redone with v9's cameras yet. The v6–v8 frame sheets are kept under `Renders/` (video files are not in git); from v8 on, each version is tagged in git (`git checkout v8`).
 
-## 目录
+## Contents
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `Docs/Research/01_NYSM2_Scene_Reference.md` | 电影场景逐拍分析：Framestore 制作资料、逐帧测量、视觉特征清单 |
-| `Docs/Research/02_Rain_Physics_And_Rendering.md` | 雨的物理与渲染文献整理，含实现参数表 |
-| `Docs/Research/03_Niagara_Programmatic_Authoring.md` | 在 UE 5.7 里用 C++ 生成 Niagara 资产的方法 |
-| `Docs/Research/frames/` | 参考片段的关键帧与联系表 |
-| `Niagara/HLSL/RainField.hlsl` | 雨场的定义（周期窗口、折回、远端淡出），构建时拼在每个粒子模块前面 |
-| `Niagara/HLSL/*.hlsl` | Niagara 自定义 HLSL 模块源码（雨滴生成/更新、溅水） |
-| `Materials/HLSL/*.hlsl` | 材质 Custom 节点源码（雨滴着色、湿地面、夜景背景） |
-| `SourceArt/` | 下载的源素材（不进 git，导入后的资产在 `Content/` 里），见 `Scripts/import_backdrop.py` |
-| `Source/ProjectRainEditor` | 编辑器模块：从上面的 HLSL 生成全部资产（`URainBuilderLibrary`），另含 Python 文件命令队列 |
-| `Source/ProjectRain` | 运行时：`ARainMagicController`（表演时间线、玩家控制、手势、灯光、相机与镜头同步） |
-| `Scripts/` | 舞台、镜头序列、渲染、调校工具（见下文） |
-| `Scripts/legacy/` | v6 的格林尼治舞台（柱廊、人群、巴士）和对应的镜头脚本 |
+| `Docs/Research/01_NYSM2_Scene_Reference.md` | Beat-by-beat analysis of the film scene: Framestore production material, frame-by-frame measurements, a list of visual traits (notes in Chinese) |
+| `Docs/Research/02_Rain_Physics_And_Rendering.md` | The literature on rain physics and rendering, with a table of implementation parameters (notes in Chinese) |
+| `Docs/Research/03_Niagara_Programmatic_Authoring.md` | How to generate Niagara assets from C++ in UE 5.7 (notes in Chinese) |
+| `Docs/Research/frames/` | Key frames and contact sheets of the reference clip |
+| `Niagara/HLSL/RainField.hlsl` | The rain field's definition (periodic window, wrapping, distant fade), prepended to every particle module at build time |
+| `Niagara/HLSL/*.hlsl` | Source of the custom Niagara HLSL modules (drop spawn and update, splashes) |
+| `Materials/HLSL/*.hlsl` | Source of the materials' Custom nodes (drop shading, wet ground, night backdrop) |
+| `SourceArt/` | Downloaded source art (not in git; the imported assets are in `Content/`), see `Scripts/import_backdrop.py` |
+| `Source/ProjectRainEditor` | Editor module: generates every asset from the HLSL above (`URainBuilderLibrary`), plus the Python file command queue |
+| `Source/ProjectRain` | Runtime: `ARainMagicController` (performance timeline, player control, gestures, lights, camera and lens sync) |
+| `Scripts/` | Tools for the stage, the shot sequence, rendering and tuning (see below) |
+| `Scripts/legacy/` | v6's Greenwich stage (colonnade, crowd, bus) and its shot scripts |
 
-所有 `.uasset` 都由代码生成。要改效果，改 `.hlsl` 或 C++，然后重新构建即可。
+Every `.uasset` is generated from code. To change the effect, edit the `.hlsl` or the C++ and rebuild.
 
-## 构建与渲染
+## Building and rendering
 
-编辑器开着时，用 `python3 Scripts/ue_cmd.py "<python>"` 或 `python3 Scripts/ue_cmd.py -f <file.py>` 在编辑器里执行 Python。这是一个文件命令队列；这台 Mac 上 Python Remote Execution 的组播发现不可用，所以用它代替。
+With the editor open, run Python in it with `python3 Scripts/ue_cmd.py "<python>"` or `python3 Scripts/ue_cmd.py -f <file.py>`. This is a file command queue, used instead of Python Remote Execution, whose multicast discovery does not work on this Mac.
 
 ```python
-# 第一次：下载背景全景图并导入（见 Scripts/import_backdrop.py 的说明），之后不用再做
+# First time only: download the background panorama and import it (see the notes in Scripts/import_backdrop.py)
 #   curl -o SourceArt/rathaus_4k.hdr https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/rathaus_4k.hdr
 #   python3 Scripts/ue_cmd.py -f Scripts/import_backdrop.py
 import unreal
 L = unreal.RainBuilderLibrary
-print(L.build_rain_assets(230000, 15000, 60000))  # 雨滴总数、溅水粒子数、其中造雨塔雨滴数 → 材质、MPC、HLSL 模块、NS_RainMagic
-print(L.build_stage_materials())                   # M_RainBasic、M_WetGround、M_NightSky
-# 然后执行 Scripts/build_stage.py（关卡）和 Scripts/build_sequence.py（镜头序列）
-exec(open(unreal.Paths.project_dir() + "Scripts/render_mrq.py").read()); render(0, 46, "RainTrick")  # MRQ 渲染
+print(L.build_rain_assets(230000, 15000, 60000))  # total drops, splash particles, rain-tower drops among them -> materials, MPC, HLSL modules, NS_RainMagic
+print(L.build_stage_materials())                   # M_RainBasic, M_WetGround, M_NightSky
+# Then run Scripts/build_stage.py (the level) and Scripts/build_sequence.py (the shot sequence)
+exec(open(unreal.Paths.project_dir() + "Scripts/render_mrq.py").read()); render(0, 46, "RainTrick")  # MRQ render
 ```
 
-- 雨滴数决定密度：窗口是 16 m × 16 m × 6 m（1536 m³），17 万颗雨场雨滴即每立方米 110 颗；6 万颗造雨塔雨滴在舞台中心每立方米再加 270 颗。
-- `build_rain_assets` 会返回编译报告：每个 Niagara 脚本的状态、HLSL/GPU 错误，以及材质编译错误。
-- `build_rain_assets` 重新绑定关卡里的 `RainMagic` 时会调用一次 `ResetSystem()`，编辑器里会因此多出一批雨滴。在编辑器里重建资产后，重启编辑器再看密度和帧率。
-- `build_stage.py` 会清空关卡并删掉所有相机，所以之后一定要重跑 `build_sequence.py`，否则 `LS_RainTrick` 的绑定会失效。
-- `render_mrq.py` 会把控制器设为不循环，并保存关卡。渲染完要把 `loop` 改回 `True`，`render_width_override` 改回 0，才能交互预览。`render(..., cvars={...})` 可以只为这次渲染设置控制台变量。
-- `Scripts/restart_editor.sh`：编译 C++ 并重启编辑器（`nobuild` 参数只重启）。
-- `Scripts/fps_probe.py <标签> [秒数]`：按墙钟时间测编辑器或 PIE 的帧率，结果追加到 `Saved/fps.txt`。
-- `Scripts/rshot.sh` 配合 `Scripts/rainlib.py`：把表演定格在某个时刻，从指定相机截图（`CAM=CineCam_Close` 选机位）；`rainlib.sky(曝光, 偏航)` 调背景并重新采集环境。加 `SETTLE=4` 会先下 4 秒雨再执行（让之前升空停放的雨滴落回来）；等待放在 shell 里，因为编辑器 Python 里的 `sleep` 会让整个编辑器停住。
-- 诊断工具：`describe_niagara_system`（RI 参数，包括循环时长）、`dump_generated_hlsl`（导出生成的 HLSL）、`build_diag_system`（二分排错用的单发射器系统）。
-- 调试视图：把控制器的 `DropExposure` 设成大于 99，所有可见雨滴都会画成不透明洋红色，用来检查雨滴在哪、有多少。
+- The drop count sets the density. The window is 16 m × 16 m × 6 m (1536 m³), so 170k rain-field drops make 110 per m³; the 60k rain-tower drops add another 270 per m³ at the centre of the stage.
+- `build_rain_assets` returns a compile report: each Niagara script's status, HLSL/GPU errors, and material compile errors.
+- When `build_rain_assets` rebinds the level's `RainMagic`, it calls `ResetSystem()` once, which spawns an extra batch of drops in the editor. After rebuilding the assets in the editor, restart it before judging density and frame rate.
+- `build_stage.py` clears the level and deletes every camera, so always rerun `build_sequence.py` afterwards, or `LS_RainTrick`'s bindings break.
+- `render_mrq.py` sets the controller not to loop and saves the level. After rendering, set `loop` back to `True` and `render_width_override` back to 0 for interactive preview. `render(..., cvars={...})` sets console variables for that render only.
+- `Scripts/restart_editor.sh`: compiles the C++ and restarts the editor (`nobuild` only restarts it).
+- `Scripts/fps_probe.py <label> [seconds]`: measures the frame rate of the editor or PIE by wall clock and appends the result to `Saved/fps.txt`.
+- `Scripts/rshot.sh` with `Scripts/rainlib.py`: freezes the performance at a moment and takes a screenshot from a given camera (`CAM=CineCam_Close` picks it); `rainlib.sky(exposure, yaw)` adjusts the background and recaptures the environment. `SETTLE=4` first lets it rain for 4 s (so drops parked in the sky fall back). The wait lives in the shell, because `sleep` in the editor's Python freezes the whole editor.
+- Diagnostics: `describe_niagara_system` (RI parameters, including the loop duration), `dump_generated_hlsl` (exports the generated HLSL), `build_diag_system` (a single-emitter system for bisecting errors).
+- Debug view: set the controller's `DropExposure` above 99 and every visible drop is drawn opaque magenta, to check where the drops are and how many there are.
 
-## 雨场（`Niagara/HLSL/RainField.hlsl`）
+## The rain field (`Niagara/HLSL/RainField.hlsl`)
 
-雨被定义成一个**在 x、y 方向以 16 m 为周期的无限、均匀的雨场**，只模拟其中一个周期：一个 16 m × 16 m、从地面到 6 m 高的窗口，始终放在相机前方（相机站在窗口后边缘内 1.5 m）。
+The rain is defined as an **infinite, uniform rain field, periodic in x and y with a 16 m period**, and only one period is simulated: a 16 m × 16 m window from the ground to 6 m up, always placed in front of the camera (the camera stands 1.5 m inside the window's back edge).
 
-- 雨滴离开窗口时从对面回来。在周期场里，那正是同一颗雨滴，所以从任何机位看、在任何切镜处，雨场都是连续的，不会出现"雨柱的边"。
-- 相机永远在雨里。镜头前 0.6 m 起就有雨滴，近大远小、近少远多全由透视产生，不需要另外的"近景层"。
-- 作用在雨滴上的力也保持周期性：以表演者为中心的力（停雨波、旋涡、手）用最近的周期像计算，并在半个周期内衰减到零；ABC 湍流的波长是周期的 1/3。
-- 雨滴在离相机水平 8–14 m 处淡出（广角镜头会更早），所以折回永远发生在看不见的地方。
-- 溅水的撞击点是雨场里固定的世界点，折回窗口后再画，相机移动时溅水不会跟着滑动。地面涟漪铺满整个地面。
-- **造雨塔**：拍电影时，场地上方架着造雨塔，喷出的是大水滴，这样在镜头里才看得清。前 6 万颗雨滴就是这种雨：
-  - 只落在舞台中心（雨系统 Actor 的位置）周围，按高斯分布由密到疏（σ 2.5 m，6 m 截断）；
-  - 直径 2–6 mm，均值约 3.6 mm。
-  - 它们不折回窗口，因为舞台只在一个地方。推走以后，要等雨重新落下才会回到舞台上。
-  - 落在舞台上的那部分溅水也跟着集中在这里。
+- A drop leaving the window comes back in from the opposite side. In a periodic field that is the same drop, so the field is continuous from any camera and across any cut: there is never an "edge of the rain column".
+- The camera is always in the rain. Drops start 0.6 m in front of the lens; near-large and far-small, sparse near and dense far, all come from perspective, with no separate "near layer".
+- The forces on the drops stay periodic too: the forces centred on the performer (stop wave, vortex, hand) use the nearest periodic image and fade to zero within half a period; the ABC turbulence's wavelength is a third of the period.
+- Drops fade out 8–14 m from the camera horizontally (earlier with wide lenses), so the wrapping always happens out of sight.
+- A splash's impact point is a fixed world point in the field, wrapped into the window before drawing, so splashes do not slide when the camera moves. The ground ripples cover the whole ground.
+- **Rain towers:** on a film set, rain towers above the set spray big drops, so that the rain reads on camera. The first 60k drops are this rain:
+  - they fall only around the centre of the stage (the rain system actor's position), densest in the middle, in a Gaussian (σ 2.5 m, cut off at 6 m);
+  - they are 2–6 mm across, about 3.6 mm on average;
+  - they do not wrap, since the stage is in one place: pushed away, they come back to the stage only once the rain falls again;
+  - the splashes of the ones landing on the stage are concentrated there too.
 
-| 发射器 | 数量 | 作用 |
+| Emitter | Count | Role |
 |---|---|---|
-| Rain | 23 万：雨场 17 万（110 颗/m³）+ 造雨塔 6 万（中心 270 颗/m³） | 唯一的雨。雨场：直径 1–6 mm 的截断 Marshall–Palmer 分布（均值约 2 mm）；造雨塔：2–6 mm |
-| Splash | 1.5 万（每簇 12 颗） | 撞击溅起的二次水珠，约 30% 落在舞台上 |
+| Rain | 230k: 170k rain field (110 per m³) + 60k rain towers (270 per m³ at the centre) | The only rain. Rain field: a truncated Marshall–Palmer distribution, 1–6 mm across (about 2 mm on average); rain towers: 2–6 mm |
+| Splash | 15k (12 per burst) | Secondary droplets thrown up by impacts, about 30 % of them on the stage |
 
-## 舞台（`Scripts/build_stage.py`）
+## The stage (`Scripts/build_stage.py`)
 
-- **夜景背景**：Poly Haven 的 "Rathaus"（Greg Zaal，CC0），汉堡市政厅前湿漉漉的广场、阴天夜空，是一张 HDR 全景图，贴在 500 m 的天空球上（`Materials/HLSL/NightSky.hlsl`）。
-  - 它同时是雨珠折射的环境：雨滴的环境 Cubemap 从舞台里采集，背景就在其中。
-  - 全景图按方向查找，所以看不出视差；查找方向从相机正下方的地面算起，于是全景图的地平线正好落在我们地面的尽头，建筑立在我们的铺地上。
-  - 它也按镜头虚化（见"景深"）。曝光 18，偏航 0°（主机位背后是市政厅）。
-- 一块 1.2 km 的湿铺地，一直铺到天空球；表演者是 UE 小白人 Manny。
-- 薄雾被城市灯光照成暖色。雾只到 450 m，不罩住背景，因为全景图本身已经带着空气感。
-- 雨靠逆光才看得见：只有灯落在雨滴前向散射光瓣里时，雨滴才亮。所以灯光是三盏远处的大灯（40 m 外、10 m 高，比机位视线高约 10°，正好在画框上沿外），像片场吊车上的灯：
-  - +8°：主机位正后方；
-  - -40°：高位三分之四镜头（Cam_B）的反方向；
-  - +70°：环绕镜头（Cam_D）的反方向。
-  
-  灯离得远，从镜头前到背景的每颗雨滴受光都差不多，近处雨滴不会比远处暗。它们只照人和雨，不照地面（lighting channel 1），否则会在湿地面上反射出一大片眩光。它们在画外，不显示灯体（背景里有真实的路灯）。雨滴只在它们的光锥里被照亮。
-- 一盏近处侧灯照亮地面，一盏主光打在表演者身上。
-  - `Lamp_Sky`：高位点光源，照射范围只有 1 m，所以不照亮场景，只参与雨滴的高光和散射计算，给仰拍镜头里升空的雨滴逆光。
-- 体积雾默认关闭，因为它每帧要多花约 4 ms；勾选雾 Actor 的 Volumetric Fog 可以找回光束。
-- **机位**（Super35 2.39:1）：雨要读成水，雨滴必须既在焦内、又在屏幕上够大，所以机位都离得近、用大光圈，背后的城市虚成光斑。`CineCam_Hero` 是 PIE 默认视角，`V` 键依次切换：
+- **Night backdrop:** Poly Haven's "Rathaus" (Greg Zaal, CC0), a wet square in front of Hamburg's city hall under an overcast night sky. It is an HDR panorama on a 500 m sky sphere (`Materials/HLSL/NightSky.hlsl`).
+  - It is also the environment the drops refract: the drops' environment cubemap is captured from the stage, with the backdrop in it.
+  - The panorama is looked up by direction, so it shows no parallax. The lookup direction is taken from the ground right below the camera, so the panorama's horizon falls exactly where our ground ends, and its buildings stand on our paving.
+  - The lens blurs it too (see "Depth of field"). Exposure 18, yaw 0° (the city hall is behind the hero camera).
+- A 1.2 km wet paving that runs out to the sky sphere; the performer is the UE mannequin Manny.
+- A thin fog lit warm by the city lights. It reaches only 450 m and does not cover the backdrop, since the panorama has its own atmosphere.
+- Rain shows only against the light: a drop is bright only when a light falls in its forward-scattering lobe. So the lights are three big distant ones (40 m away, 10 m up, about 10° above the cameras' line of sight, just above the top of the frame), like lights on cranes on a film set:
+  - +8°: right behind the hero camera;
+  - −40°: opposite the high three-quarter shot (Cam_B);
+  - +70°: opposite the orbiting shot (Cam_D).
 
-  | 机位 | 镜头 | 构图 |
+  Being far away, they light every drop about equally, from in front of the lens to the backdrop, so near drops are not darker than far ones. They light only the performer and the rain, not the ground (lighting channel 1); otherwise they would reflect as a large glare on the wet ground. They are out of frame, and their bodies are not shown (the backdrop has real street lamps). Drops are lit only inside their cones.
+- A near side light lights the ground, and a key light falls on the performer.
+  - `Lamp_Sky`: a high point light with a 1 m attenuation radius, so it lights nothing in the scene. It only enters the drops' highlights and scattering, to backlight the rising drops in the upward shots.
+- Volumetric fog is off by default, because it costs about 4 ms a frame; tick Volumetric Fog on the fog actor to bring the light shafts back.
+- **Cameras** (Super35, 2.39:1): to read as water, drops must be both in focus and large enough on screen, so the cameras stand close with wide apertures, and the city behind melts into bokeh. `CineCam_Hero` is the default view in PIE; `V` cycles through them:
+
+  | Camera | Lens | Framing |
   |---|---|---|
-  | `CineCam_Hero` | 40 mm f/2.2，对焦 2.05 m | 略低于视线的半身镜头，像片中那样，雨悬在他四周 |
-  | `CineCam_Close` | 50 mm f/2，对焦 1.82 m | 越过他的头看向广场：镜头前的雨珠，城市化成光斑 |
-  | `CineCam_Side` | 50 mm f/2.8，对焦 2.18 m | 从侧面、手的高度：停住的雨衬着亮着的橱窗 |
-  | `CineCam_Low` | 35 mm f/2.8，对焦 2.9 m | 低机位仰拍，越过他看向路灯和发亮的夜空 |
-  | `CineCam_Wide` | 35 mm f/2.8，对焦 6.5 m | 6.5 m 外的全身（v8 的主机位） |
-- 后期体积关闭了 Lumen GI 和 Lumen 反射，改用 SSR。
-- 项目默认地图（编辑器启动和游戏）都指向 `L_RainStage`。
+  | `CineCam_Hero` | 40 mm f/2.2, focus 2.05 m | A half-body shot slightly below eye level, as in the film, with the rain hanging all around him |
+  | `CineCam_Close` | 50 mm f/2, focus 1.82 m | Over his head towards the square: drops in front of the lens, the city as bokeh |
+  | `CineCam_Side` | 50 mm f/2.8, focus 2.18 m | From the side at hand height: the stopped rain against lit shop windows |
+  | `CineCam_Low` | 35 mm f/2.8, focus 2.9 m | Low, looking up past him to the street lamps and the glowing night sky |
+  | `CineCam_Wide` | 35 mm f/2.8, focus 6.5 m | Full body from 6.5 m (v8's hero camera) |
+- The post-process volume turns off Lumen GI and Lumen reflections and uses SSR instead.
+- The film's map is `L_RainStage`. The project's default map (editor startup and game) is now Paint Valley's `L_PaintValley`, so open `L_RainStage` from the Content Browser.
 
-## 设计要点
+## Design notes
 
-**第一层：雨的真实感**
+**Layer 1: realistic rain**
 
-- 尺寸：截断指数分布（Marshall–Palmer 1948）。终端速度：`v = 9.65 − 10.3·e^(−0.6D)`（Atlas 1973）。速度按 `τ = v_t/g` 向目标弛豫。
-- 阵风：一个随时间缓慢漂移的阵风场（与雨场同周期），加上每颗雨滴自己的摆动，让雨丝各有倾角。小雨滴更跟随空气。强度是控制器的 `Gust`。
-- 运动模糊：精灵长度 `L = v·T + D`，T 为 180° 快门。材质沿运动方向对"折射球体"的着色做解析积分，覆盖率约等于 `D/L`（Garg & Nayar 2006），同一个材质能从雨丝连续过渡到雨珠。
-- 光学：雨滴按水做的球透镜处理（IOR 1.333，F0 0.02）：前表面反射、两次折射得到的倒像（采样舞台的 HDR 环境 Cubemap，里面有夜景背景），加上 6 盏灯的反射和透射高光。所以每颗雨珠里都有一个倒过来的街景：下沿是发亮的夜空，中间一个亮芯是背后灯光透过水珠成的像。
-- **像素足迹过滤**：一个像素在雨珠上覆盖的范围，和镜头虚化的范围，都会让这个像素"看到"一束方向。所以环境从相应模糊的 mip 读取，高光瓣按 `1/n' = 1/n + σ²` 加宽并保持能量。小雨珠显示的是周围景物的柔和平均，不会抖成乱爬的细弧；离焦的雨珠就是同一颗雨珠被抹开。
-- **形状**：雨滴是扁球，沿下落方向压扁，高宽比取 Beard & Chuang 1987 的拟合（2 mm 0.93、4 mm 0.78、6 mm 0.64）。每颗略有倾斜；悬停时大雨滴缓慢摇晃、"呼吸"，所以没有两颗雨珠的高光落在同一处。从相机看是一个椭圆，按椭球着色。
-- **拖尾只算横向运动**：精灵永远正对相机，拖尾长度和方向只取速度里垂直于视线的那部分。正对镜头飞来或飞走的雨滴保持圆珠、只是变大，不会像 v8 那样翻成侧面、变成一片薄片。
-- 屏幕尺寸 LOD：小于 2.5 像素的雨滴在 Niagara 里逐粒子算一次灯光散射（前向散射瓣 `exp((cosθ−1)/ScatterLobe)`，`ScatterLobe = 0.15`：灯在雨滴正后方时最亮，偏 30° 降一半），材质只算覆盖率。这份光画成一个亮芯（总能量不变），不是一个均匀发光的圆点。大雨滴走完整的球透镜着色，并在阈值附近混入逐粒子光，跨阈值时亮度不跳变。
-- **亮度差异**：每颗雨滴的形状和倾斜决定了有多少灯光的像能落进镜头，所以灯光部分逐颗乘 0.45–1.55。聚光灯只照亮光锥里的雨滴。
-- 最小尺寸：任何雨滴都不画得小于 1.5 像素，能量按面积摊开。亚像素精灵在时域抗锯齿下会乱爬、闪烁。
-- **景深**：用当前摄影机的真实镜头参数（焦距、光圈、对焦距离；`DofScale = 1`）做薄透镜模型。离焦雨滴画在它的模糊圆上，亮度按面积摊薄（alpha / 模糊²），并保留球透镜着色。因此越虚越淡，不会变成亮光斑，也不会在离焦时切换到更亮的着色路径（v8 中途出现光斑就是这个原因）。同一个镜头还作用于不透明的舞台（MPC `Lens`）：
-  - 背景全景图按 光圈/对焦距离 的角度取模糊 mip；
-  - 湿地面离焦处的细节被抹平；
-  - 地面与背景在地平线处按模糊圆跨过地平线的比例混合，镜面掠射反射在模糊半径内让位，所以交界处不会出现一条硬线。
-  - 引擎景深仍然关闭（`r.DepthOfFieldQuality=0`）：它每帧 3–6 ms，还会在某些帧把"景深之后"渲染的雨滴也虚化掉。
-- 雨丝增益：细的长雨丝在物理上太暗，按 `max(1, G·s/max(s,60))` 提亮（`StreakGain = 40`）；几个像素宽的雨丝（离镜头很近）本来就看得清，不再提亮，否则会变成贯穿画面的亮白竖条。
-- 亮度是对着夜景背景调的：雨滴主要靠折射背景显形，灯光只加一个亮芯（`ScatterGain = 2`、`GlintGain = 8`）。`SkyGlow`（给没有亮天空的舞台用的解析天光）默认是 0。
-- 冻结时雨滴视觉尺寸放大 2.5 倍（片中悬停的水珠显得大）。
+- Sizes: a truncated exponential distribution (Marshall–Palmer 1948). Terminal velocity: `v = 9.65 − 10.3·e^(−0.6D)` (Atlas 1973). The velocity relaxes towards it with `τ = v_t/g`.
+- Gusts: a slowly drifting gust field (with the rain field's period), plus each drop's own sway, so the streaks lean at different angles. Small drops follow the air more. The strength is the controller's `Gust`.
+- Motion blur: the sprite's length is `L = v·T + D`, with T a 180° shutter. The material integrates the shading of the "refracting sphere" analytically along the motion, and the coverage is about `D/L` (Garg & Nayar 2006), so one material goes smoothly from streak to bead.
+- Optics: a drop is a ball lens of water (IOR 1.333, F0 0.02). It shows the front-surface reflection, the inverted image from two refractions (sampling the stage's HDR environment cubemap, which holds the night backdrop), and the reflected and transmitted highlights of 6 lights. So every bead holds an upside-down street: the glowing night sky along its lower edge, and in the middle a bright core, the image of the light behind it seen through the water.
+- **Pixel-footprint filtering:** the area a pixel covers on a bead, and the lens blur, both make a pixel "see" a bundle of directions. So the environment is read from a correspondingly blurred mip, and the highlight lobes widen by `1/n' = 1/n + σ²` with their energy kept. A small bead shows a soft average of its surroundings instead of thin crawling arcs; a defocused bead is the same bead smeared out.
+- **Shape:** a drop is an oblate spheroid, flattened along its fall, with the aspect ratios of Beard & Chuang 1987's fit (2 mm 0.93, 4 mm 0.78, 6 mm 0.64). Each is tilted a little; while hovering, big drops slowly wobble and "breathe", so no two beads have their highlight in the same place. Seen from the camera it is an ellipse, shaded as an ellipsoid.
+- **Streaks from sideways motion only:** the sprite always faces the camera, and the streak's length and direction use only the part of the velocity across the line of sight. A drop flying straight at the lens or away from it stays a round bead and only grows, instead of turning edge-on into a thin sheet as in v8.
+- Screen-size LOD: for drops smaller than 2.5 pixels, Niagara computes the lights' scattering once per particle (forward-scattering lobe `exp((cosθ−1)/ScatterLobe)`, `ScatterLobe = 0.15`: brightest with the light right behind the drop, half as bright 30° off), and the material computes only the coverage. That light is drawn as a bright core (same total energy), not as a uniformly glowing dot. Big drops get the full ball-lens shading and blend in the per-particle light near the threshold, so the brightness does not jump across it.
+- **Brightness variation:** each drop's shape and tilt decide how much of the lights' image reaches the lens, so the light part is multiplied by 0.45–1.55 per drop. Spotlights light only the drops in their cones.
+- Minimum size: no drop is drawn smaller than 1.5 pixels; its energy is spread over the area. Sub-pixel sprites crawl and flicker under temporal anti-aliasing.
+- **Depth of field:** a thin-lens model with the current camera's real lens settings (focal length, aperture, focus distance; `DofScale = 1`). A defocused drop is drawn over its circle of confusion, its brightness spread by area (alpha / blur²), and it keeps the ball-lens shading. So the further out of focus, the fainter: never a bright bokeh disc, and no switch to a brighter shading path when defocused (that switch is why bokeh appeared halfway through in v8). The same lens acts on the opaque stage (MPC `Lens`):
+  - the backdrop panorama takes a blurred mip by the angle of aperture over focus distance;
+  - out-of-focus detail on the wet ground is smoothed away;
+  - ground and backdrop blend at the horizon by the share of the circle of confusion that crosses it, and the grazing specular reflection gives way within the blur radius, so there is no hard line where they meet;
+  - the engine's depth of field stays off (`r.DepthOfFieldQuality=0`): it costs 3–6 ms a frame, and on some frames it also blurs the drops rendered "after DOF".
+- Streak gain: thin long streaks are physically too dark, so they are brightened by `max(1, G·s/max(s,60))` (`StreakGain = 40`). Streaks a few pixels wide (very close to the lens) already read, so they are not brightened; otherwise they would become bright white bars across the frame.
+- Brightness is tuned against the night backdrop: drops show mainly by refracting the backdrop, and the lights only add a bright core (`ScatterGain = 2`, `GlintGain = 8`). `SkyGlow` (an analytic sky light for stages without a bright sky) is 0 by default.
+- Frozen drops are drawn 2.5 times larger (in the film the hovering beads look big).
 
-**第二层：控制**
+**Layer 2: control**
 
-- 每颗雨滴有一个冻结权重，在"自然下落速度"和"受控速度场"之间插值。受控速度场包括：悬停呼吸、抬升、混沌、手势拖拽。玩家的推力和笔刷叠加在两者之上：对下落的雨是风，对悬停的雨是飞行。
-- 停雨波从手部向外扩散。受控弛豫时间 0.07 s，对应 24 fps 下 6–8 帧，与片中实测一致。
-- 混沌：绕表演者的旋涡（6.5 m 内）、ABC 无散度流，再加每颗雨滴各自缓慢转向的随机速度。整体以表演者为中心：2 m 内满强度，5 m 外降到 15%，否则镜头前每颗雨滴都会拖出横跨画面的条纹。只保留地面和雨顶两处约束。
-- 抬升：雨滴按高度和随机量错开起飞，以 60 cm/s² 加速到最高 4 m/s，升到 24 m 前淡出，然后停放。
-- 雨滴不销毁：落地后从雨顶的随机位置重新落下；抬升出画的雨滴先停放，恢复降雨时从天空重新落下。看不见的雨滴（视野外、停放、淡出、离镜头太近）精灵尺寸置零，GPU 不会光栅化它们。
-- 单步时长限制在 0.1 s 以内：卡顿一帧不会把下落的雨滴一步送到地下几十米。
-- 时间线是"时间 → 参数"的确定性函数。MRQ 以固定 1/23.976 s 步长推进，所以渲染可复现。
-- 控制器每帧先得到一份 `FRainTrickState`（是否冻结、停雨波、混沌、抬升、下雨程度、手），来源要么是表演时间线，要么是玩家操作，然后在同一处写给雨和地面。
-- 控制器在 `TG_PostUpdateWork` 运行，也就是相机管理器更新之后，读到的视角正是这一帧要渲染的视角；雨的 Niagara 系统排在最后 tick（`ForceTickLast`），当帧就用上这些参数。早一些读取时，MRQ 的序列可能还超前一帧（渲染前它会再定回当前帧），每个切镜前的最后一帧，雨场都会按下一个镜头摆放。
+- Each drop has a freeze weight that blends its "natural falling velocity" with a "controlled velocity field". The controlled field holds the hover breathing, the lift, the chaos and the gesture drag. The player's push and brush add on top of both: wind for falling rain, flight for hovering rain.
+- The stop wave spreads out from the hand. The controlled relaxation time is 0.07 s, 6–8 frames at 24 fps, as measured in the film.
+- Chaos: a vortex around the performer (within 6.5 m), an ABC divergence-free flow, and each drop's own slowly turning random velocity. It is centred on the performer: full strength within 2 m, down to 15 % beyond 5 m; otherwise every drop in front of the lens would streak across the frame. Only two constraints are kept: the ground and the top of the rain.
+- Lift: drops take off staggered by height and by a random amount, accelerate at 60 cm/s² to at most 4 m/s, fade out before 24 m, and are then parked.
+- Drops are never destroyed. After landing they fall again from a random point at the top of the rain; drops lifted out of frame are parked first, and fall from the sky again when the rain resumes. Invisible drops (out of view, parked, faded out, too close to the lens) get a zero sprite size, so the GPU does not rasterise them.
+- A single step is capped at 0.1 s, so a hitch cannot send a falling drop tens of metres underground in one step.
+- The timeline is a deterministic function from time to parameters. MRQ advances in fixed steps of 1/23.976 s, so renders are reproducible.
+- Each frame the controller first gets an `FRainTrickState` (frozen or not, stop wave, chaos, lift, how hard it rains, the hand), either from the performance timeline or from the player, and then writes it to the rain and the ground in one place.
+- The controller runs in `TG_PostUpdateWork`, after the camera manager updates, so it reads the very view this frame renders; the rain's Niagara system ticks last (`ForceTickLast`) and uses these parameters in the same frame. When they were read earlier, MRQ's sequence could still be a frame ahead (it sets the current frame again before rendering), and on the last frame before every cut the rain field was placed for the next shot.
 
-## 交互（PIE）
+## Interaction (PIE)
 
-按任一控制键，就从脚本表演切换到玩家控制，并从表演当前的状态接着来（比如正在悬停，就保持悬停）。
+Pressing any control key switches from the scripted performance to player control, carrying on from the performance's current state (if it is hovering, it keeps hovering).
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `Space` | 冻结 / 释放：停雨波从手部扩散，雨停在半空；再按一次，雨重新落下 |
-| `W` `A` `S` `D` | 沿相机方向推动雨（前、左、后、右）：下雨时是风，冻结时雨滴成群飞走，每颗速度略有不同 |
-| `E` / `Q` | 向上 / 向下推 |
-| 鼠标左键拖拽 | 笔刷：光标下的雨滴（任何深度）跟着光标走。笔刷在表演模式下也能用 |
-| `C` | 乱舞开 / 关（雨没冻结时会先冻结） |
-| `R` | 升空：雨滴升回天空（雨没冻结时会先冻结）；按 `Space` 释放后，雨从天上重新落下 |
-| `1`–`6` | 回到脚本表演：下雨、停雨、悬停、乱舞、升空、恢复降雨 |
-| `V` | 切换机位（`ShowcaseCameras`：主机位、特写、侧拍、低机位、全身），雨场和镜头参数跟着新机位走 |
-| `P` | 暂停表演时间线 |
-| `H` | 显示 / 隐藏左上角的状态与按键提示 |
+| `Space` | Freeze / release: the stop wave spreads from the hand and the rain stops in mid-air; press again and the rain falls again |
+| `W` `A` `S` `D` | Push the rain along the camera (forward, left, back, right): wind while it rains; when frozen, the drops fly off in a flock, each at a slightly different speed |
+| `E` / `Q` | Push up / down |
+| Left mouse drag | Brush: the drops under the cursor (at any depth) follow it. The brush also works during the performance |
+| `C` | Chaos on / off (freezes the rain first if it is falling) |
+| `R` | Lift: the drops rise back into the sky (freezes the rain first if it is falling); after a release with `Space`, the rain falls from the sky again |
+| `1`–`6` | Back to the scripted performance: rain, stop, hover, chaos, lift, rain again |
+| `V` | Switch camera (`ShowcaseCameras`: hero, close, side, low, wide); the rain field and lens settings follow the new camera |
+| `P` | Pause the performance timeline |
+| `H` | Show / hide the status and key hints at the top left |
 
-这些操作也都是蓝图可调用的函数（`SetHeld`、`SetPushInput`、`SetBrush`、`SetChaos`、`StartLift`、`TakeControl`、`JumpToBeat`），可以从蓝图或 Python 驱动；`GetTrickState` 返回当前状态。键盘和鼠标只在状态变化或按住时才写入，不会覆盖脚本设的值。
+These are all Blueprint-callable functions too (`SetHeld`, `SetPushInput`, `SetBrush`, `SetChaos`, `StartLift`, `TakeControl`, `JumpToBeat`), so Blueprint or Python can drive them; `GetTrickState` returns the current state. The keyboard and mouse write only when the state changes or a key is held, so they do not override values a script sets.
 
-推力速度 `PushSpeed`、笔刷半径 `BrushRadiusDeg`、乱舞渐变时间 `ChaosRamp` 在 *Rain|Player* 分类下；外观参数在 *Rain|Look*、*Rain|Hand*、*Rain|Beats* 分类下。
+The push speed `PushSpeed`, the brush radius `BrushRadiusDeg` and the chaos ramp time `ChaosRamp` are under the *Rain|Player* category; the look parameters are under *Rain|Look*, *Rain|Hand* and *Rain|Beats*.
 
-注意：雨场是无限的，推动时整片雨都在流动，雨滴从一边飞出、另一边会一直有新的飞进来，不会"推空"画面。造雨塔的雨团不会折回，推走就离开舞台，按 `Space` 让雨重新落下后才回来。
+Note: the rain field is infinite, so a push moves the whole field. Drops flying out on one side are replaced by new ones flying in on the other, so the frame never "empties". The rain towers' cluster does not wrap: pushed away it leaves the stage, and it comes back only after `Space` lets the rain fall again.
 
-## 性能
+## Performance
 
-在 M2 Pro、32 GB 内存上测得：
+Measured on an M2 Pro with 32 GB of memory:
 
-| 版本 | 编辑器视口 | PIE |
+| Version | Editor viewport | PIE |
 |---|---|---|
-| v6（50 m 雨场 + 格林尼治舞台，开一分钟后） | 2.5 fps，越跑越慢 | — |
-| v7（6 m 雨柱，13.5 万颗） | 约 34 fps | 34–36 fps |
-| v8（跟随相机的雨场，23 万颗） | 约 30 fps（视口是 90° 视场、无遮幅，看到的雨更多） | 35–37 fps，整条时间线稳定 |
-| v9（+ 夜景背景、造雨塔、真实景深、2.5 px LOD） | — | 下雨 31.9、悬停 30.6–33.9（按机位）、乱舞 30.1 fps |
+| v6 (50 m rain field + Greenwich stage, after a minute) | 2.5 fps, slowing down over time | — |
+| v7 (6 m rain column, 135k drops) | about 34 fps | 34–36 fps |
+| v8 (camera-following rain field, 230k drops) | about 30 fps (the viewport has a 90° field of view and no letterbox, so it sees more rain) | 35–37 fps, steady over the whole timeline |
+| v9 (+ night backdrop, rain towers, real depth of field, 2.5 px LOD) | — | rain 31.9, hover 30.6–33.9 (by camera), chaos 30.1 fps |
 
-- 雨本身每帧约 4–6 ms：模拟 0.4–0.7 ms，排序约 0.4 ms，其余是半透明绘制。粒子数已经不是主要瓶颈：从 46 万降到 31 万，帧率几乎不变。
-- 引擎景深（含 bokeh scatter）每帧 3–6 ms，在 `Config/DefaultEngine.ini` 里关闭；用不到的半透明光照体积也关了。
-- 抗锯齿（2026-10-28）：TSR 的历史缓冲从输出分辨率的 2 倍（Epic 档）降到 1 倍，并关掉编辑器专用的天空大气提示，PIE 从 33.2 提到 38.3 fps。下雨、悬停、乱舞三个阶段画面看不出差别。离线渲染（`render_mrq.py`）仍用 2 倍。
-  - 也试过别的方案：TAA 可到 49.6 fps，但运动中的雨线会变软、拖影；FXAA 在同样的渲染分辨率（63.5%）下无法重建细节，画面发糊。在原生 100% 下用 FXAA 又和原来一样慢，还会闪烁。
-- 没有用 Niagara 的 `VisibilityTag` 做 GPU 剔除：在 UE 5.7（Metal）上，它和按深度排序一起用时，会把排序列表末尾、也就是离镜头最近的雨滴丢掉。
-- 测帧率前先重启编辑器：重建资产后的着色器编译、`ProfileGPU` 打开的分析窗口，都会让帧率偏低。
+- The rain itself costs about 4–6 ms a frame: simulation 0.4–0.7 ms, sorting about 0.4 ms, the rest translucent drawing. The particle count is no longer the main bottleneck: from 460k down to 310k drops the frame rate barely changes.
+- The engine's depth of field (with bokeh scatter) costs 3–6 ms a frame and is off in `Config/DefaultEngine.ini`; the unused translucency lighting volume is off too.
+- Anti-aliasing (2026-10-28): TSR's history buffer went from 2× the output resolution (the Epic setting) to 1×, and the editor-only sky atmosphere notification was turned off; PIE went from 33.2 to 38.3 fps. Rain, hover and chaos look the same. Offline renders (`render_mrq.py`) still use 2×.
+  - Other options were tried. TAA reaches 49.6 fps, but moving streaks get soft and smear. FXAA cannot rebuild detail at the same render resolution (63.5 %), so the image is blurry; at native 100 % it is as slow as before and also flickers.
+- Niagara's `VisibilityTag` GPU culling is not used: on UE 5.7 (Metal), combined with depth sorting, it drops the end of the sorted list, which is the drops nearest the lens.
+- Restart the editor before measuring the frame rate: shader compilation after rebuilding assets, and the profiler window that `ProfileGPU` opens, both lower it.
 
-v6 卡顿的根因是两个粒子数累积的 bug（系统默认 5 秒循环会重复生成爆发；`ResetSystem()` 会多生成一批），已在 v7 修复。
+v6's slowdown came from two bugs that piled up particles (the system's default 5 s loop re-fired the spawn burst, and `ResetSystem()` spawned an extra batch); both were fixed in v7.
 
-## 环境说明
+## Environment notes (the development Mac)
 
-- 本机是 Xcode 27，UE 5.7 默认只接受到 Xcode 26.9。已把 `Engine/Config/Apple/Apple_SDK.json` 的 `MaxVersion` 改为 27.9.0，原文件备份为 `Apple_SDK.json.bak_projectrain`。Xcode 27 还需要单独安装 Metal 工具链：`xcodebuild -downloadComponent MetalToolchain`。
-- 编辑器在后台时默认会降低 CPU 占用，这会让 Niagara 停止模拟。编辑器模块启动时已强制关闭这一项。
-- 编辑器视口不受 `r.ScreenPercentage` 控制；要比较分辨率影响，请在 PIE 里测。
-- 磁盘空间很紧。编辑器运行时，系统交换文件会多占 4–5 GB。
+- This Mac has Xcode 27, while UE 5.7 accepts only up to Xcode 26.9 by default. `MaxVersion` in `Engine/Config/Apple/Apple_SDK.json` was changed to 27.9.0, with the original backed up as `Apple_SDK.json.bak_projectrain`. Xcode 27 also needs the Metal toolchain installed separately: `xcodebuild -downloadComponent MetalToolchain`.
+- By default the editor lowers its CPU use in the background, which stops Niagara from simulating. The editor module forces this off at startup.
+- The editor viewport ignores `r.ScreenPercentage`; compare resolutions in PIE.
+- Disk space is tight. While the editor runs, the system's swap takes another 4–5 GB.
 
-## 已知问题与下一步
+## Known issues and next steps
 
-- 镜头序列 `LS_RainTrick` 和成片还是 v8 的机位（大多是远景），没有按 v9 的构图重做，也没有重新渲染。
-- 真实键盘和鼠标输入没有亲自验证。控制函数在 PIE 里都用脚本调用验证过（冻结、推动、笔刷划过、乱舞、升空、释放、切换机位），按键只是调用同一组函数；但我没法从外部给 PIE 窗口发按键（macOS 辅助功能授权），需要你在 PIE 里试一下。
-- 全景图没有视差：机位只在几米内移动时看不出来，大范围移动的镜头会露馅。如果之后要把 v6 的格林尼治场景搬回来，最省的办法是从那个场景拍一张 360° HDR 全景替换这张。
-- 高位俯拍（Cam_B）和环绕镜头（Cam_D）比主机位暗：雨只在逆光时亮，这两个机位离背光灯方向较远。片场的做法是每个机位单独打灯。
-- 升空的仰拍镜头（Cam_E 后段）里雨滴很少，大部分已经升出画面或离镜头太远。
-- MRQ 渲染时，表演时间线比镜头序列略有超前：渲染预热帧期间时间线也在推进。在一次从 15.75 秒开始的局部渲染里，实测约 3 帧，所以节拍会比切镜稍早一点。整段渲染没有单独测过。
-- 雨场是无限的：推动（WASD）时整片雨都在流动，画面不会被"推空"；按 `R` 升空才能把雨送走。
-- 编辑器里刚执行完耗时较长的命令（重建舞台、重建资产）后马上截图，雨可能还没稳定；等几秒再拍，或用 `rshot.sh` 的 `SETTLE`。
+- The shot sequence `LS_RainTrick` and the finished film still use v8's cameras (mostly wide shots); they have not been redone with v9's framing or re-rendered.
+- Real keyboard and mouse input has not been tested by hand. Every control function was verified from scripts in PIE (freeze, push, a brush stroke, chaos, lift, release, camera switch), and the keys only call the same functions. Keys could not be sent to the PIE window from outside (macOS accessibility permission), so a hands-on check in PIE is still to do.
+- The panorama has no parallax. That is invisible while the camera moves only a few metres, but a shot that travels far would give it away. To bring v6's Greenwich scene back later, the cheapest route is to shoot a 360° HDR panorama of that scene and use it in place of this one.
+- The high overhead shot (Cam_B) and the orbiting shot (Cam_D) are darker than the hero camera: the rain is bright only against the light, and these cameras are far from the backlights' direction. On a set, each camera position gets its own lighting.
+- The upward shot of the lift (the later part of Cam_E) has few drops; most have already risen out of frame or are too far from the lens.
+- In MRQ renders the performance timeline runs slightly ahead of the shot sequence, because the timeline also advances during the warm-up frames. A partial render starting at 15.75 s measured about 3 frames, so the beats come slightly before the cuts. A full render was not measured separately.
+- The rain field is infinite: pushing (WASD) moves the whole field and never empties the frame; only the lift (`R`) sends the rain away.
+- Right after a long command in the editor (rebuilding the stage or the assets), the rain may not have settled yet for a screenshot; wait a few seconds, or use `rshot.sh`'s `SETTLE`.

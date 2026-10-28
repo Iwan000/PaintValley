@@ -1,129 +1,129 @@
-# 美术方向：纪念碑谷 × 斯普拉顿（paint 分支）
+# Art direction: Monument Valley × Splatoon (branch `paint`)
 
-参考图在 `SourceArt/Reference/`（已 gitignore，不进仓库、不进报告）：
-- `MonumentValley1/`、`MonumentValley2/`、`MonumentValley3/`：Steam 商店截图（1920×1080）。最贴近目标的几张：`mv_2_09`（桃色背景上的浮空城堡）、`mv_2_06`（白底橙色拱门）、`mv_2_03`（奶油底上的彩色浮岛）、`mv_1_03`（雾中的粉色塔）、`mv_3_02`（浅青色底、粉色和青色的塔）。
-- `Splatoon/`：斯普拉顿 3 宣传截图。墨水看 `sp3_10`、`sp3_16`（紫和黄的墨落在载具和地面上）、`sp3_05`（俯视的红色墨面）、`sp3_03`（空中的黄色墨团）。
+Reference images are in `SourceArt/Reference/` (gitignored; not in the repo and not in the report):
+- `MonumentValley1/`, `MonumentValley2/`, `MonumentValley3/`: Steam store screenshots (1920×1080). The ones closest to the target look: `mv_2_09` (a floating castle on a peach background), `mv_2_06` (orange arches on white), `mv_2_03` (colourful floating islands on cream), `mv_1_03` (a pink tower in fog), `mv_3_02` (pink and teal towers on light teal).
+- `Splatoon/`: Splatoon 3 promotional screenshots. For the ink, see `sp3_10`, `sp3_16` (purple and yellow ink on vehicles and the ground), `sp3_05` (a red ink surface seen from above), `sp3_03` (yellow ink blobs in the air).
 
-## 纪念碑谷：从参考图里观察和取色
+## Monument Valley: observations and colours picked from the references
 
-**几何**
-- 正交、真等距视角（俯角 35.26°，偏航 45°）。
-- 方块化建筑，带细节：雉堞、台阶、拱门窗洞、圆形舷窗、尖顶。
-- 主体漂浮在纯色或渐变背景上，下面带一块底座。
+**Geometry**
+- Orthographic, true isometric view (35.26° downward pitch, 45° yaw).
+- Blocky buildings with details: battlements, steps, arched door and window openings, round portholes, spires.
+- The main structure floats on a flat or gradient background, with a base under it.
 
-**面着色**
-- 不做实时光照，每个朝向一个固定颜色（相当于 6 方向的 "ambient cube"）。
-- 面与面之间换的是色相，不只是明暗。`mv_2_09` 里左侧面暗、右侧面亮、顶面最亮。
+**Face shading**
+- No real-time lighting. Each facing has one fixed colour (in effect a 6-direction "ambient cube").
+- From face to face the hue changes, not just the brightness. In `mv_2_09` the left side is dark, the right side light, and the top lightest.
 
-| 材质 | 顶面 | 亮侧面 | 暗侧面 | 取色位置 |
+| Material | Top | Light side | Dark side | Picked from |
 |---|---|---|---|---|
-| 米色塔身 | `#e2edd2` | `#cad2bb` | `#b3b488` | mv_2_09 |
-| 粉色底座 | （浅粉） | `#ff88a8` | `#fb565d` | mv_2_09 |
-| 青绿树篱 | `#4fcec1` | `#24abbb` | `#0c8d92` | mv_2_09 |
-| 橙色拱门 | `#ffd251` | `#ff8853` | `#e65961`，往上渐变到紫 `#aa73b7` | mv_2_06 |
-| 尖顶 | — | `#2f3b46` | `#22354e` | mv_2_09 |
+| Beige tower body | `#e2edd2` | `#cad2bb` | `#b3b488` | mv_2_09 |
+| Pink base | (light pink) | `#ff88a8` | `#fb565d` | mv_2_09 |
+| Teal hedge | `#4fcec1` | `#24abbb` | `#0c8d92` | mv_2_09 |
+| Orange arch | `#ffd251` | `#ff8853` | `#e65961`, shading up to purple `#aa73b7` | mv_2_06 |
+| Spire | — | `#2f3b46` | `#22354e` | mv_2_09 |
 
-**其他特征**
-- 角落和缝隙里有柔和、带颜色的 AO。
-- 顶部边缘有细亮线，比如雉堞顶上的 `#f5eb91`。
-- 门洞是暗棕色渐变（`#917e60`）。
-- 背景是低对比的柔和渐变：桃色 `#ffe9dc` → `#f6ba95`（左下角暖光晕）；也有纯白（`mv_2_06`）和浅青雾（`mv_1_03` 的 `#c2dfe5`）。
-- 浮空物体下方有一团柔和的暖色投影（`#f9cbae`）。
-- 画面上没有 HUD。
+**Other traits**
+- Soft, tinted AO in corners and gaps.
+- Thin bright lines on top edges, e.g. `#f5eb91` on top of the battlements.
+- Doorways are a dark brown gradient (`#917e60`).
+- Backgrounds are soft, low-contrast gradients: peach `#ffe9dc` → `#f6ba95` (a warm glow in the bottom-left corner). There is also plain white (`mv_2_06`) and a light teal fog (`#c2dfe5` in `mv_1_03`).
+- Floating objects have a soft, warm shadow under them (`#f9cbae`).
+- There is no HUD on screen.
 
-## 斯普拉顿墨水
+## Splatoon ink
 
-- 颜色饱和，与场景主色形成对比，比如紫配黄、橙配绿。
-- 墨贴着表面走，边界是不规则的团块，边缘附近有小卫星墨点。
-- 表面有光泽：高光加轻微的厚度感。
-- 空中的墨是粘稠的团块，后面拖着尾巴。
+- Saturated colours that contrast with the scene's main colours, e.g. purple with yellow, orange with green.
+- Ink follows the surface. Its boundary is made of irregular blobs, with small satellite dots near the edge.
+- The surface is glossy: highlights plus a slight sense of thickness.
+- Ink in the air is a thick, sticky blob trailing a tail.
 
-## 落到本项目的做法
+## How this project does it
 
-- 正交等距相机，可以按 90° 旋转视角。
-- 盒子几何由 C++ 生成，每个外露面在"上色图集"里分到一块区域。
-- 图集通道：R 存颜料，G 存烘焙的 AO，B 存门窗等装饰，A 存边缘亮线。
-- 材质用 Unlit，侧面色调按相机的左右计算，所以转视角后仍然是"左暗右亮"。
-- 叠加竖直渐变、带颜色的 AO 和底部淡出，不用实时光、阴影和 Lumen。
-- 颜色取自参考图（sRGB 十六进制）。色调曲线关掉（Tone Curve Amount 0、Expand Gamut 0），用色卡验证画面里的颜色和调色板一致。
+- An orthographic isometric camera. The view turns in 90° steps.
+- Box geometry is generated in C++. Each exposed face gets a region in the "paint atlas".
+- Atlas channels: R holds paint, G baked AO, B decoration such as doors and windows, A the bright edge lines.
+- The material is Unlit. Side tones are computed from the camera's left and right, so after the view turns it is still "dark left, light right".
+- A vertical gradient, tinted AO and a fade at the bottom are layered on top. No real-time lights, shadows or Lumen.
+- Colours are picked from the references (sRGB hex). The tone curve is off (Tone Curve Amount 0, Expand Gamut 0). A colour chart checks that the colours on screen match the palette.
 
-## 迭代记录
+## Iteration log
 
-- **r1**：取色准确（色卡 `#ff8853` 渲染成 `#ff8754`），但形体是"玩具城堡"。审核 5/10。
-- **r2**，按审核意见修改：
-  - 形体：底座缩小、加高，加勒脚和腰线；塔改成细高（约 6:1）、塔顶外挑；主楼开叠涩拱门洞；加柱子和天桥；加第二座小浮岛。
-  - 细节：雉堞改扁宽且数量减半；尖顶改成水滴形加小旗；门窗改成尖拱带门框；舷窗改成同心圆环、三个一组。
-  - 着色和背景：AO 范围更大、强度约 10%；背景顶部改成均匀色；浮岛下方加投影。
+- **r1**: The colours are accurate (chart `#ff8853` renders as `#ff8754`), but the forms look like a "toy castle". Review: 5/10.
+- **r2**, changes from the review:
+  - Forms: the base is smaller and taller, with a plinth and a string course; the tower is now tall and thin (about 6:1), with an overhanging top; the main building gets a corbelled-arch doorway; columns and a bridge are added; a second small floating island is added.
+  - Details: the battlements are flatter and wider, and half as many; the spire is now teardrop-shaped with a small flag; doors and windows are pointed arches with frames; the portholes are concentric rings in groups of three.
+  - Shading and background: the AO reaches further, at about 10% strength; the top of the background is now one flat colour; a shadow is added under the floating island.
 
-- **r3**（6/10 → 6.5/10）：
-  - 新增真正的圆拱和尖拱几何体：前后墙挖洞，内弧由平面条带拼成，可以上色；
-  - 舷窗做成"浅外环 + 筒壁 + 品红深孔"，门窗加侧壁亮边；
-  - AO 分成很淡的大范围项和约 15% 的接触项；
-  - 塔身加中段阳台和顶下线脚；小塔加顶冠和圆顶，第二座浮岛抬高并用天桥连起来；
-  - 尖顶相邻的面明暗交替，换成波浪飘带。
-  - 另外修正了正交取景：引擎默认的 `MaintainYFOV` 下，`OrthoWidth` 实际是画面高度。
-- **r4**（按 r3 意见收尾，未再送审）：
-  - 底座压矮，高处向浅暖黄 `#e4e0a0` 渐变；
-  - 粉色地面加 30 cm 淡地砖格（对应游戏网格），窗洞亮边只在一侧；
-  - 青色门加宽加厚，尖顶和飘带加大，天桥加粗；
-  - 小塔顶部开拱洞、底部加门。
-- **审核提过、还没做的**：
-  - 米色体量伸出底座边缘、下面用四分之一圆拱托住（悬挑）；
-  - 阳台下加圆形托座；
-  - 门上的木板纹、门洞内部的竖直渐变；
-  - 青色障碍物做成树篱质感；
-  - 尖顶螺旋形的面、顶端的菱形尖饰。
+- **r3** (6/10 → 6.5/10):
+  - New, real round-arch and pointed-arch geometry: the front and back walls are cut open, and the inner curve is built from flat strips that can take colour;
+  - Portholes are "light outer ring + tube wall + deep magenta hole"; doors and windows get a bright edge on their side walls;
+  - AO is split into a very faint wide term and a contact term of about 15%;
+  - The tower gets a balcony halfway up and a moulding below the top; the small tower gets a crown and a dome; the second floating island is raised and joined by a bridge;
+  - Neighbouring faces of the spire alternate light and dark; the flag becomes a wavy ribbon.
+  - Also fixed the orthographic framing: under the engine's default `MaintainYFOV`, `OrthoWidth` is actually the frame's height.
+- **r4** (finishing the r3 review notes; not reviewed again):
+  - The base is lower, and shades to a light warm yellow `#e4e0a0` higher up;
+  - The pink ground gets a faint 30 cm tile grid (matching the game grid); window openings have a bright edge on one side only;
+  - The teal door is wider and thicker, the spire and ribbon are bigger, and the bridge is thicker;
+  - The small tower gets an arched opening at the top and a door at the bottom.
+- **Raised in review, not done yet**:
+  - The beige mass sticks out past the edge of the base, held up by a quarter-round arch below (a cantilever);
+  - Round corbels under the balcony;
+  - A wood-plank pattern on the doors; a vertical gradient inside the doorways;
+  - The teal blockers get a hedge texture;
+  - Spiral faces on the spire, and a diamond-shaped finial on its tip.
 
-## 性能（M2 Pro，独立窗口 1920×1080，100% 分辨率，不开粒子）
+## Performance (M2 Pro, standalone window 1920×1080, 100% resolution, no particles)
 
-| 场景 | 帧时间 | 说明 |
+| Scene | Frame time | Notes |
 |---|---|---|
-| 旧写实场景（L_RainShield） | 26.5 ms | 报告里的基线 |
-| 新场景 + TSR | 14.8 ms | ProfileGPU：TSR 一个 pass 12.7 ms |
-| 新场景 + FXAA | ≤ 8.3 ms | 被 120 Hz 刷新率封顶；按 pass 估算真正的渲染工作约 2–3 ms（Metal 的 ProfileGPU 把约 5 ms 的等待算进了 "Scene"，未单独验证） |
+| Old realistic scene (L_RainShield) | 26.5 ms | The baseline in the report |
+| New scene + TSR | 14.8 ms | ProfileGPU: the TSR pass alone is 12.7 ms |
+| New scene + FXAA | ≤ 8.3 ms | Capped by the 120 Hz refresh rate. Estimated from the passes, the real render work is about 2–3 ms (Metal's ProfileGPU counts about 5 ms of waiting in "Scene"; not verified separately) |
 
-游戏里用 FXAA：纯色硬边不需要时间超分辨率，而且 TSR 会让运动的雨滴拖出残影。
+The game uses FXAA. Flat colours with hard edges don't need temporal super resolution, and TSR leaves ghost trails behind moving drops.
 
-## 上色：水塘，而不是斯普拉顿墨迹（2026-10-27 用户决定）
+## Paint: puddles, not Splatoon ink (decided 2026-10-27)
 
-- 参考：用户生成的图 `SourceArt/Reference/User/paint_rain_reference.png`。
-  - 颜料是平铺、哑光的色块，边缘由许多圆弧连成，略透出地砖，里面有淡淡的涟漪圈。
-  - 雨是细长的彩色线，末端挂一颗水滴形的珠子。
-  - 暂时只用一种颜色：取参考图里的蓝 `#6ab4ec`。
-- 做法：每滴颜料落下，生成一个逐渐散开的小圆（约 1 秒长到 9 cm）。圆是元球，核函数为 (1 − (d/R)²)³，场值到阈值就显色，所以相邻的圆在接触前就连成一片，像水塘连起来。
-- 着色：平涂颜料色，顶面略亮、暗侧略暗，透明度 8%，边缘一圈亮边。斯普拉顿式的亮唇和暗边已去掉。
-- 雨滴（按用户参考图）：细长的彩色线，前端挂一颗带高光的水珠，尾部渐细、渐隐。落地后在原地停留 0.5 秒，变成贴着表面扩散、变淡的涟漪圈。
-- 两种雨滴（用户决定）：
-  - 大雨滴落地生成水塘；
-  - 小雨滴不直接上色，落在已有水塘上时喂给它，每滴让面积多 12 cm²，按 0.15 秒一批生效，所以小雨滴会让色块向外扩张；
-  - `rain.paint.SmallPaints 1` 改成每滴都直接生成一个 4 cm 的小水塘。
-- 挡板改成纪念碑谷 2 的淡紫色（`#bd9ad8` 一系），和蓝色颜料区分开。
-- 第二轮（用户反馈"雨点难看、小雨滴太细、水塘像鞋印"）：
-  - 雨滴：改成两端圆润的短胶囊，从头到尾渐淡，不再有尖尾；小雨滴宽 2.6 cm、不透明度 0.38，大雨滴宽 4.2 cm。
-  - 涟漪：只出现在朝上的面。
-  - 水塘：改成水彩感。
-    - 场值映射改成"边缘 0.25、四倍阈值时到 1"，颜料叠得越多颜色越深；
-    - 边缘有一条颜料沉积的深色细线；
-    - 三个尺度（70 cm / 23 cm / 9 cm）的柔和斑驳，约 ±12% 浓淡，带一点色相漂移；
-    - 边界上叠一点细噪声，只作用在边缘附近。
-- 修过的 bug：颜料的朝向明暗曾按法线 z 的正负分支，屏幕导数法线在墙面上 z≈0 会逐像素翻转，形成一层划纹。已改成连续过渡。
-- 第三轮（用户反馈 2026-10-28）：
-  - 规则：小雨滴落在还没上色的地方直接回收，只有落在颜料上的才消耗，并喂给那个水塘。之前试过的"渗入"（空白处积出淡淡的颜料）已删掉。
-    - 判断放在 CPU 上：落到目标物上的雨滴照常导出，CPU 看落点最近纹素的颜料场是否到显色阈值。这样水塘连成片的地方也算颜料。
-    - GPU 上的粒子从此不会消失：落地后都回到云里，每颗离开云时按自己的序号和"剩余比例"决定还下不下。雨会随消耗变稀，看不出是哪一颗被用掉了。
-    - 大雨滴占比改成 3%（用户最早举的例子）。
-  - 冻结：雨线长度随冻结程度收短，最后变成水珠。水珠是原宽度的 1.6 倍，小雨滴不透明度升到 0.7，有深色边、底部聚光和左上角高光，并缓慢"呼吸"。
-  - 方向球：半透明奶油色玻璃球，画 30° 一条的经纬线，两极就是雨的方向轴，箭头从中穿过。
-    - 拖动按地球仪方式：按住时抓住的那一点球面始终跟着光标；拖到球外时，绕视线方向转动。
-    - 输入模式改成拖动时不隐藏、不锁光标。原来引擎在按住鼠标时改用原始鼠标输入，光标位置不变，所以球拖不动。
-  - 界面：左上角缩成一窄列，只放回合时间、上色进度条（带 90% 刻度）、剩余雨量条和统计。操作提示移到左下角。
-- 第四轮（用户反馈 2026-10-28）：
-  - 规则：连在一起的颜料算一整块，跨面不算一块。小雨滴落进哪一块，就让那一整块的边缘一起向外推进同样的距离（喂入面积 ÷ 周长），中间的洞和远处的小口也会一起补上。实现方式：每个面的纹素网格上做洪泛分组，加上 8SSEDT 距离变换，边缘位置可以落在两个纹素之间；被别的块或面的边界挡住、没长出去的颜料，在下次分组时补回。
-  - 冻结时间：按住方向球时，回合计时和颜料扩散一起停。
-  - 冻结的雨滴：去掉边线、高光和底部亮光，改成均匀、半透明的圆形雨滴。
-  - 胶片版雨滴（开局前按 F 或点按钮切换）：空中每颗雨滴都是一个球透镜，用 Scene Color 显示身后场景的倒像，加暗边、高光和一点颜料色；下落时是拖长的倒像加一条亮芯。落地仍然和现在一样。
-  - 系统二：CPU 弹性颜料球。会弹跳，飞行时拉长、撞击时压扁；打到目标物就炸开上色，然后用掉。球与球之间用邻居查询碰撞。
-  - 新增四关：Canopy、Courtyard（雨）；Nook、Pinball（颜料球）。
-- 第五轮（用户反馈 2026-10-28）：用户问为什么水塘又像分了两种颜色。原因是水彩着色按颜料厚度分深浅：大雨滴水塘的中心厚、颜色深，整块扩张长出来的颜料刚过阈值、颜色浅，阈值附近还会画出深色细线。用户决定不要水彩感，整块颜色要一致，效果不和厚度挂钩。
-  - 材质：去掉按厚度的深浅和沉积细线，只用一种颜料色，按所在面的朝向明暗着色，略透出地砖；大面积上只保留 ±3% 的低频明暗漂移。边缘的细小抖动保留。
-  - 生长：块内部被四周颜料包住的纹素，颜料量至少是阈值的 2 倍，这样边缘噪声不会在块中间抠出小洞；生长时外沿后面 2 cm（原来是 6 cm）内就变实。
+- Reference: a generated image, `SourceArt/Reference/User/paint_rain_reference.png`.
+  - The paint is flat, matte patches. Their edges are chains of many arcs, the tiles show through a little, and there are faint ripple rings inside.
+  - The rain is thin coloured lines, each with a teardrop-shaped bead at the end.
+  - Only one colour for now: the blue `#6ab4ec` from the reference image.
+- Method: each drop of paint that lands makes a small circle that spreads (to 9 cm in about 1 s). The circles are metaballs with the kernel (1 − (d/R)²)³. Colour shows where the field reaches a threshold, so neighbouring circles merge before they touch, like puddles joining.
+- Shading: flat paint colour, slightly lighter on top faces and slightly darker on dark sides, 8% transparency, a bright rim around the edge. The Splatoon-style bright lip and dark edge are gone.
+- Drops (following the reference image): thin coloured lines with a highlighted bead at the front, and a tail that tapers and fades. On landing, a drop stays in place for 0.5 s and becomes a ripple ring that spreads along the surface and fades.
+- Two kinds of drops (decided):
+  - A big drop makes a puddle where it lands;
+  - A small drop does not paint directly. When it lands on an existing puddle it feeds it: each drop adds 12 cm² of area, applied in batches every 0.15 s, so small drops make the patch grow outwards;
+  - `rain.paint.SmallPaints 1` instead makes every drop create a small 4 cm puddle directly.
+- The blockers are now Monument Valley 2's lilac (the `#bd9ad8` family), to set them apart from the blue paint.
+- Iteration 2 (feedback: "the drops look bad, the small drops are too thin, the puddles look like footprints"):
+  - Drops: now short capsules rounded at both ends, fading from head to tail, with no pointed tail; small drops are 2.6 cm wide at opacity 0.38, big drops 4.2 cm wide.
+  - Ripples: only on upward-facing faces.
+  - Puddles: now with a watercolour feel.
+    - The field mapping is now "0.25 at the edge, 1 at four times the threshold", so the more paint piles up, the darker the colour;
+    - The edge has a thin dark line of settled pigment;
+    - Soft mottling at three scales (70 cm / 23 cm / 9 cm), about ±12% in density, with a little hue drift;
+    - A little fine noise on the boundary, acting only near the edge.
+- Bug fixed: the paint's shading by facing used to branch on the sign of the normal's z. The screen-derivative normal has z≈0 on walls and flips per pixel there, which left a layer of scratch marks. It is now a continuous blend.
+- Iteration 3 (feedback 2026-10-28):
+  - Rule: a small drop that lands where there is no paint yet goes straight back to the cloud. Only drops that land on paint are used up, and they feed that puddle. The "seeping" tried before (faint paint building up on bare surface) is removed.
+    - The check runs on the CPU: drops that land on the target are exported as usual, and the CPU checks whether the paint field at the texel nearest the landing point reaches the colour threshold. So places where puddles have joined also count as paint.
+    - Particles on the GPU no longer die: after landing they all go back to the cloud, and as each one leaves the cloud, its own index and the "share left" decide whether it still falls. The rain thins as it is used up, and you can't tell which drop was used.
+    - Big drops are now 3% of the drops (the first example given).
+  - Freeze: the rain streaks shorten as the freeze sets in, and end up as beads. A bead is 1.6 times the original width; the small drops' opacity rises to 0.7; the beads have a dark rim, light focused at the bottom and a highlight at the top left, and slowly "breathe".
+  - Trackball: a translucent cream glass ball with latitude and longitude lines every 30°. Its poles are the rain's direction axis, and the arrow passes through it.
+    - Dragging works like a globe: while the button is held, the grabbed point on the sphere stays under the cursor; dragged outside the ball, it turns about the view direction.
+    - The input mode no longer hides or locks the cursor while dragging. Before, the engine switched to raw mouse input while the button was held, so the cursor position did not change and the ball could not be dragged.
+  - The panel: shrunk to a narrow column in the top left with only the round time, the coverage bar (with a 90% mark), the bar for the rain left, and stats. Control hints moved to the bottom left.
+- Iteration 4 (feedback 2026-10-28):
+  - Rule: paint that is joined together counts as one body; a body does not cross faces. Whichever body a small drop lands in, that whole body's outline moves out by the same distance (fed area ÷ perimeter), so holes inside it and small gaps far away fill in too. Implementation: grouping by flood fill on each face's texel grid, plus an 8SSEDT distance transform; the outline can sit between two texels. Paint that could not grow out, held back by another body or the face's edge, is given back at the next grouping.
+  - Freezing time: while the trackball is held, the round clock and the paint's spreading stop together.
+  - Frozen drops: the rim, highlight and bottom glow are gone; they are now even, translucent round drops.
+  - Film-look drops (toggle with F or the button before a round): each drop in the air is a ball lens that uses Scene Color to show an upside-down image of the scene behind it, with a dark rim, a highlight and a little paint colour; a falling drop shows the image stretched out, with a bright core. Landing is the same as now.
+  - System 2: bouncy CPU paint balls. They bounce, stretch in flight and squash on impact; a ball that hits the target bursts and paints, and is then used up. Balls collide with each other through a neighbour query.
+  - Four new levels: Canopy, Courtyard (rain); Nook, Pinball (paint balls).
+- Iteration 5 (feedback 2026-10-28): Question: why do the puddles look two-coloured again? Cause: the watercolour shading made paint darker or lighter by its thickness. A big drop's puddle is thick and dark at the centre, paint grown by a whole body's spread is just over the threshold and light, and a thin dark line is also drawn near the threshold. Decision: no watercolour feel; a whole body is one colour, and no effect is tied to thickness.
+  - Material: the thickness-based shading and the settled-pigment line are removed. There is one paint colour, shaded by the facing of the face it is on, with the tiles showing through slightly; over large areas only a ±3% low-frequency brightness drift remains. The fine jitter at the edge stays.
+  - Growth: texels inside a body that are surrounded by paint hold at least 2 times the threshold amount of paint, so the edge noise cannot cut small holes in the middle of a body; while growing, paint becomes solid within 2 cm (was 6 cm) behind the outer edge.

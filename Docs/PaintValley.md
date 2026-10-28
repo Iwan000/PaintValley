@@ -1,6 +1,6 @@
 # Paint Valley — design and implementation notes (branch `paint`)
 
-Paint Valley is the redesign of the Rain Shield course project. The structure is blocks on a floating island in Monument Valley's style. You steer a rain of paint so that it covers the cream "target" blocks. The lilac blockers and the pink ground repel paint. A round ends at 90 % coverage (the clock is the score) or when the paint runs out. Art notes and the iteration log are in `Docs/ArtDirection.md` (Chinese).
+Paint Valley is the redesign of the Rain Shield course project. The structure is blocks on a floating island in Monument Valley's style. You steer a rain of paint so that it covers the cream "target" blocks. The lilac blockers and the pink ground repel paint. A round ends at 90 % coverage (the clock is the score) or when the paint runs out. Art notes and the iteration log are in `Docs/ArtDirection.md`.
 
 ## Run
 
