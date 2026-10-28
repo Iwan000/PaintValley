@@ -2,6 +2,8 @@
 
 Cheng Guo (cg401@duke.edu), developed in collaboration with Claude Opus 5.5 (Anthropic).
 
+**Submission:** [video](https://github.com/Iwan000/PaintValley/releases/download/v2.0-paintvalley/PaintValley_video.mp4) (86 s, 1080p, MP4) · [performance report](Docs/PaintValleyReport.pdf) (PDF, 2 pages) · [release `v2.0-paintvalley`](https://github.com/Iwan000/PaintValley/releases/tag/v2.0-paintvalley) · build steps and console variables below.
+
 A puzzle game where **Niagara particles paint the level**. Structures of grid blocks float in Monument Valley's style. You steer a stream of paint with a trackball until it covers 90 % of the cream target blocks; the clock is the score, and the pool of paint can run out. Blockers and the ground take no paint. Paint spreads as puddles that join, and drops that land on paint grow it. The mechanic borrows from *Auditorium* (a particle stream bent by the player until it fills its targets). The earlier version, Rain Shield, is the tag `v1.0-rainshield`; its section below is unchanged.
 
 The same mechanic has two configurations; press **Tab** before a round to switch (the idle one is paused and hidden):
@@ -14,9 +16,9 @@ The same mechanic has two configurations; press **Tab** before a round to switch
 | Per-particle logic | 3 rules: steer towards the player's direction (a hose-like lag), swept collision against up to 32 boxes, recycle on landing | State machine (cloud, flying, resting, burst); swept collision with bounce, friction and squash; collision with the 2 nearest balls (a neighbour query on a Particle Attribute Reader bound to the emitter) |
 | Back to gameplay | Each drop landing on a target face that is not full → Export Particle Data (GPU readback) → paint, pool | Each burst on the target → Export Particle Data → paint, pool |
 
-**Performance report:** `Docs/PaintValleyReport.pdf` (2 pages). Data: `Docs/Perf/paint_sweep.csv`. Profiler captures: `Docs/Perf/paint_*`.
-**Video:** [PaintValley_video.mp4](https://github.com/Iwan000/PaintValley/releases/tag/v2.0-paintvalley) on the release page (86 s, 1080p; video files are not in git, locally `Renders/PaintValley_video.mp4`). It is a recording of the scripted tour `-PaintDemo` (`Scripts/paint_demo.sh`). `stat fps` is on throughout, and `stat unit` and the Niagara debug HUD join it while the particle count changes live. In the tour a scripted player aims like a person would: it finds the target faces still bare, turns the view to them (Q / E) and steers the paint there.
-**Design notes:** `Docs/PaintValley.md` (rules, both systems, levels, code map). Art notes: `Docs/ArtDirection.md`.
+**Performance report:** [`Docs/PaintValleyReport.pdf`](Docs/PaintValleyReport.pdf) (2 pages). Data: `Docs/Perf/paint_sweep.csv`. Profiler captures: `Docs/Perf/paint_*`.
+**Video:** [PaintValley_video.mp4](https://github.com/Iwan000/PaintValley/releases/download/v2.0-paintvalley/PaintValley_video.mp4) (86 s, 1080p, 95 MB), attached to the [release](https://github.com/Iwan000/PaintValley/releases/tag/v2.0-paintvalley); video files are not in git (locally `Renders/PaintValley_video.mp4`). It is a recording of the scripted tour `-PaintDemo` (`Scripts/paint_demo.sh`). `stat fps` is on throughout, and `stat unit` and the Niagara debug HUD join it while the particle count changes live. In the tour a scripted player aims like a person would: it finds the target faces still bare, turns the view to them (Q / E) and steers the paint there.
+**Design notes:** [`Docs/PaintValley.md`](Docs/PaintValley.md) (rules, both systems, levels, code map). Art notes: [`Docs/ArtDirection.md`](Docs/ArtDirection.md).
 
 ## Build and run (Paint Valley)
 
