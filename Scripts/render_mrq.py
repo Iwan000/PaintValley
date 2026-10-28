@@ -48,9 +48,12 @@ def render(start_s=0.0, end_s=46.0, name="RainTrick", width=1920, height=804, sp
     aa.render_warm_up_count = 8
     aa.use_camera_cut_for_warm_up = False
 
-    # Extra console variables for this render only, e.g. cvars={"r.DepthOfFieldQuality": 2}.
+    # Extra console variables for this render only, e.g. cvars={"r.DepthOfFieldQuality": 2}. The real-time setting of
+    # TSR's history at the output resolution (Config/DefaultEngine.ini) goes back to the Epic level's 200 % for movies.
     cv = cfg.find_or_add_setting_by_class(unreal.MoviePipelineConsoleVariableSetting)
-    for k, v in (cvars or {}).items():
+    merged = {"r.TSR.History.ScreenPercentage": 200}
+    merged.update(cvars or {})
+    for k, v in merged.items():
         cv.add_or_update_console_variable(k, v)
 
     executor = unreal.MoviePipelinePIEExecutor()
