@@ -138,7 +138,8 @@ void FPaintSurface::AddFace(FFace F)
 			T.P = FVector3f(P);
 			T.Face = Faces.Num();
 			T.bVisible = !F.Hole.Contains(Lu, Lv) && !Inside(P + F.N * 0.5, F.Skip);
-			T.bTarget = B.Kind == EPaintBoxKind::Target;
+			// Downward faces never show in the isometric view at any yaw: painted, but not part of the score.
+			T.bTarget = B.Kind == EPaintBoxKind::Target && F.N.Z > -0.5;
 			T.Area = float((F.W / F.NU) * (F.H / F.NV));
 			F.Visible += T.bVisible ? 1 : 0;
 			Texels.Add(T);
@@ -338,6 +339,11 @@ int32 FPaintSurface::Build(const TArray<FPaintBox>& InBoxes, const TArray<FPaint
 	VisibleTexels = 0;
 	TargetArea = 0.0;
 	TargetPainted = 0.0;
+	Field.Init(0.0f, Texels.Num());
+	Puddles.Reset();
+	Growing.Reset();
+	PuddleHash.Reset();
+	MaxEdge = 0.0f;
 	Hash.Reset();
 	DirtyFaces.Reset();
 	for (int32 t = 0; t < Texels.Num(); ++t)
@@ -621,20 +627,116 @@ FIntVector FPaintSurface::HashCell(const FVector& P) const
 	return FIntVector(FMath::FloorToInt(P.X / HashSize), FMath::FloorToInt(P.Y / HashSize), FMath::FloorToInt(P.Z / HashSize));
 }
 
-int32 FPaintSurface::Splat(const FVector& At, float Radius, const FVector& Dir, uint32 Seed)
+FIntVector FPaintSurface::PuddleCell(const FVector& P) const
 {
-	// The outline: the radius wobbles with the direction around the splat's own axis (three random harmonics),
-	// so no two splats are round or alike. Paint is stored as a soft distance to the outline (0.5 on it, over
-	// two texels), which the material sharpens to the pixel.
-	FRandomStream Rand{ int32(Seed) };
-	const float Phase[3] = { Rand.FRand() * 6.2832f, Rand.FRand() * 6.2832f, Rand.FRand() * 6.2832f };
-	const float Amp[3] = { 0.10f + 0.10f * Rand.FRand(), 0.06f + 0.08f * Rand.FRand(), 0.04f + 0.05f * Rand.FRand() };
-	const FVector In = Dir.GetSafeNormal();
-	const FVector Ax = FVector::CrossProduct(In, FMath::Abs(In.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector).GetSafeNormal();
-	const FVector Ay = FVector::CrossProduct(In, Ax);
-	const float Reach = Radius * 1.25f + 2.0f * TexelSize;
-	const FIntVector C0 = HashCell(At - FVector(Reach)), C1 = HashCell(At + FVector(Reach));
-	int32 Newly = 0;
+	return FIntVector(FMath::FloorToInt(P.X / PuddleCellSize), FMath::FloorToInt(P.Y / PuddleCellSize), FMath::FloorToInt(P.Z / PuddleCellSize));
+}
+
+void FPaintSurface::AddPuddle(const FVector& At, float Radius, const FVector& Dir)
+{
+	FPuddle P;
+	P.At = At;
+	P.In = Dir.GetSafeNormal();
+	P.Full = Radius / EdgeShare;
+	P.bGrowing = true;
+	const int32 Index = Puddles.Add(P);
+	PuddleHash.FindOrAdd(PuddleCell(At)).Add(Index);
+	Growing.Add(Index);
+	MaxEdge = FMath::Max(MaxEdge, Radius);
+}
+
+bool FPaintSurface::Feed(const FVector& At, float Weight)
+{
+	// The puddle whose edge the drop lands deepest inside (distance over its current edge radius).
+	int32 Best = INDEX_NONE;
+	float BestShare = 1.05f;
+	const FIntVector C0 = PuddleCell(At - FVector(MaxEdge)), C1 = PuddleCell(At + FVector(MaxEdge));
+	for (int32 z = C0.Z; z <= C1.Z; ++z)
+	{
+		for (int32 y = C0.Y; y <= C1.Y; ++y)
+		{
+			for (int32 x = C0.X; x <= C1.X; ++x)
+			{
+				if (const TArray<int32>* Cell = PuddleHash.Find(FIntVector(x, y, z)))
+				{
+					for (const int32 i : *Cell)
+					{
+						const FPuddle& P = Puddles[i];
+						const float Edge = FMath::Max(P.Now * EdgeShare, 0.5f);
+						const float Share = float((At - P.At).Size()) / Edge;
+						if (Share < BestShare)
+						{
+							BestShare = Share;
+							Best = i;
+						}
+					}
+				}
+			}
+		}
+	}
+	if (Best == INDEX_NONE)
+	{
+		return false;
+	}
+	Puddles[Best].Pending += Weight * FeedArea;
+	return true;
+}
+
+void FPaintSurface::Tick(float DeltaSeconds)
+{
+	// Fed growth, in batches: the edge radius grows so the puddle's area grows by what it was fed.
+	FeedClock += DeltaSeconds;
+	if (FeedClock >= FeedPeriod)
+	{
+		FeedClock = 0.0f;
+		for (int32 i = 0; i < Puddles.Num(); ++i)
+		{
+			FPuddle& P = Puddles[i];
+			if (P.Pending <= 0.0f)
+			{
+				continue;
+			}
+			const float Edge = P.Full * EdgeShare;
+			const float Grown = FMath::Sqrt(Edge * Edge + P.Pending / UE_PI);
+			P.Full = Grown / EdgeShare;
+			P.Pending = 0.0f;
+			MaxEdge = FMath::Max(MaxEdge, Grown);
+			if (!P.bGrowing)
+			{
+				P.bGrowing = true;
+				Growing.Add(i);
+			}
+		}
+	}
+	// Spreading: the kernel radius approaches its size as 1 - exp(-t / SpreadTime), stamped every 0.25 cm.
+	const float Step = 1.0f - FMath::Exp(-DeltaSeconds / SpreadTime);
+	for (int32 g = Growing.Num() - 1; g >= 0; --g)
+	{
+		FPuddle& P = Puddles[Growing[g]];
+		P.Shown += (P.Full - P.Shown) * Step;
+		const bool bDone = P.Full - P.Shown < 0.25f;
+		P.Shown = bDone ? P.Full : P.Shown;
+		if (P.Shown > P.Now + 0.25f || bDone)
+		{
+			Spread(P.At, P.In, P.Now, P.Shown);
+			P.Now = P.Shown;
+		}
+		if (bDone)
+		{
+			P.bGrowing = false;
+			Growing.RemoveAtSwap(g);
+		}
+	}
+}
+
+void FPaintSurface::Spread(const FVector& At, const FVector& In, float From, float To)
+{
+	if (To <= From)
+	{
+		return;
+	}
+	auto Bump = [](float D, float R) { const float X = R > 0.0f ? D / R : 1.0f; return X < 1.0f ? FMath::Cube(1.0f - X * X) : 0.0f; };
+	const FIntVector C0 = HashCell(At - FVector(To)), C1 = HashCell(At + FVector(To));
 	for (int32 z = C0.Z; z <= C1.Z; ++z)
 	{
 		for (int32 y = C0.Y; y <= C1.Y; ++y)
@@ -649,37 +751,32 @@ int32 FPaintSurface::Splat(const FVector& At, float Radius, const FVector& Dir, 
 				for (const int32 t : *Cell)
 				{
 					const FTexel& T = Texels[t];
-					const FFace& F = Faces[T.Face];
 					// Faces turned away from the rain stay dry (no paint through a wall's back).
-					if (FVector::DotProduct(F.N, In) > 0.35)
+					if (FVector::DotProduct(Faces[T.Face].N, In) > 0.35)
 					{
 						continue;
 					}
-					const FVector D = FVector(T.P) - At;
-					const float Dist = D.Size();
-					if (Dist > Reach)
+					const float D = float((FVector(T.P) - At).Size());
+					if (D >= To)
 					{
 						continue;
 					}
-					const float Angle = FMath::Atan2(FVector::DotProduct(D, Ay), FVector::DotProduct(D, Ax));
-					const float R = Radius * (1.0f + Amp[0] * FMath::Sin(3.0f * Angle + Phase[0]) + Amp[1] * FMath::Sin(5.0f * Angle + Phase[1]) + Amp[2] * FMath::Sin(7.0f * Angle + Phase[2]));
-					const uint8 V = ToByte(FMath::Clamp(0.5f + (R - Dist) / (4.0f * TexelSize), 0.0f, 1.0f));
-					FColor& Out = Values[t];
-					if (V > Out.R)
+					const float Before = Field[t];
+					Field[t] += Bump(D, To) - Bump(D, From);
+					if (Before < PaintLevel && Field[t] >= PaintLevel)
 					{
-						if (Out.R < 128 && V >= 128)
-						{
-							++Newly;
-							TargetPainted += T.bTarget ? T.Area : 0.0;
-						}
-						Out.R = V;
+						TargetPainted += T.bTarget ? T.Area : 0.0;
+					}
+					const uint8 V = ToByte(FMath::Min(1.0f, 0.5f * Field[t] / PaintLevel));
+					if (V != Values[t].R)
+					{
+						Values[t].R = V;
 						DirtyFaces.Add(T.Face);
 					}
 				}
 			}
 		}
 	}
-	return Newly;
 }
 
 void FPaintSurface::ClearPaint()
@@ -692,6 +789,12 @@ void FPaintSurface::ClearPaint()
 			DirtyFaces.Add(Texels[t].Face);
 		}
 	}
+	Field.Init(0.0f, Texels.Num());
+	Puddles.Reset();
+	Growing.Reset();
+	PuddleHash.Reset();
+	MaxEdge = 0.0f;
+	FeedClock = 0.0f;
 	TargetPainted = 0.0;
 }
 
@@ -713,4 +816,14 @@ void FPaintSurface::Flush()
 	TArray<FColor>* Copy = new TArray<FColor>(Pixels);
 	Atlas->UpdateTextureRegions(0, Regions->Num(), Regions->GetData(), AtlasW * sizeof(FColor), sizeof(FColor), reinterpret_cast<uint8*>(Copy->GetData()),
 		[Regions, Copy](uint8*, const FUpdateTextureRegion2D*) { delete Regions; delete Copy; });
+}
+
+FBox FPaintSurface::Bounds() const
+{
+	FBox B(ForceInit);
+	for (const FPaintBox& Box : Boxes)
+	{
+		B += FBox(Box.Min, Box.Max);
+	}
+	return B;
 }

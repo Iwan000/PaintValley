@@ -43,6 +43,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString BuildPaintAssets();
 
+	/** Builds the paint game's System 1: NS_PaintRain (RainCount GPU ink drops by default, User.RainGameCount; steered
+	 *  by User.RainGameDir, the level's boxes, carriers' hits read back with Export Particle Data) and M_PaintDrop. */
+	UFUNCTION(BlueprintCallable, Category = "Project Rain")
+	static FString BuildPaintRainAssets(int32 RainCount = 3000);
+
 	/** Diagnostics: lists every script of a system with its usage, sim target and rapid-iteration parameters. */
 	UFUNCTION(BlueprintCallable, Category = "Project Rain")
 	static FString DescribeNiagaraSystem(const FString& ObjectPath);

@@ -10,7 +10,7 @@
 //   - baked ambient occlusion tinted with AOColor (atlas G),
 //   - openings (doors, windows, portholes; atlas B, a signed distance: rim, ring and core bands, sharp to the pixel),
 //   - a thin light line along convex top edges (atlas A, EdgeColor.a = amount),
-//   - paint (atlas R, InkColor), sharpened the same way,
+//   - paint (atlas R, InkColor): puddles, a metaball field sharpened the same way,
 //   - a fade towards FadeColor below z1 (Fade: z0, z1, amount): the structure dissolves into the backdrop.
 // The facet normal comes from the screen-space derivatives of the position, so cones and domes are flat-shaded
 // whatever their vertex normals.
@@ -45,7 +45,8 @@ PsC *= 1.0 - Tile.z * PsTl * step(0.9, PsN.z) * step(PsP.z, Tile.w) * step(0.5, 
 
 // The atlas: R paint, G ambient occlusion, B openings, A edge light.
 float4 PsA = UseAtlas > 0.5 ? Atlas.SampleLevel(AtlasSampler, UV, 0.0) : float4(0.0, 1.0, 0.0, 0.0);
-PsC *= lerp(AOColor, float3(1.0, 1.0, 1.0), PsA.g);
+float3 PsAO = lerp(AOColor, float3(1.0, 1.0, 1.0), PsA.g);
+PsC *= PsAO;
 
 // Openings: depth inside the outline (cm; B is a signed distance over +-16 cm). A rim band (OpeningRim.a cm),
 // then the hole: its far end is the core moved OpeningBarrel.a cm up and towards the screen's left
@@ -67,8 +68,15 @@ PsC = lerp(PsC, PsOpen * lerp(0.9, 1.0, PsSideT), PsO);
 float PsE = saturate((PsA.a - 0.667) / max(fwidth(PsA.a), 1e-4) + 0.5) * EdgeColor.a * (1.0 - PsO);
 PsC = lerp(PsC, EdgeColor.rgb, PsE);
 
-float PsI = saturate((PsA.r - 0.5) / max(fwidth(PsA.r), 1e-4) + 0.5);
-PsC = lerp(PsC, InkColor, PsI);
+// Paint: puddles (the user's reference, Docs/ArtDirection.md). R is the puddles' metaball field (0.5 on the
+// edge): merged circles with a scalloped outline, sharpened to the pixel. A flat, matte colour in the face's tones
+// (tops lighter, dark sides darker), a little see-through (the floor's lines show), a lighter rim along the edge.
+float PsI = saturate((PsA.r - 0.5) / max(0.7 * fwidth(PsA.r), 1e-4) + 0.5);
+float PsRim = 1.0 - saturate((PsA.r - 0.5) / max(1.6 * fwidth(PsA.r), 1e-4));
+float3 PsInkSide = lerp(InkColor * float3(0.72, 0.78, 0.88), InkColor, PsSideT);
+float3 PsInk = (PsN.z >= 0.0 ? lerp(PsInkSide, lerp(InkColor, float3(1.0, 1.0, 1.0), 0.18), PsZ2) : PsInkSide * 0.8) * PsAO;
+PsInk = lerp(PsInk, lerp(PsInk, float3(1.0, 1.0, 1.0), 0.28), PsRim);
+PsC = lerp(PsC, PsInk, PsI * 0.92);
 
 float PsF = saturate((Fade.y - PsP.z) / max(Fade.y - Fade.x, 1.0)) * Fade.z;
 PsC = lerp(PsC, FadeColor, PsF);

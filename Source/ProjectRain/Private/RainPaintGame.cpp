@@ -1,5 +1,10 @@
 #include "RainPaintGame.h"
 
+#include "RainShieldTypes.h"
+#include "DrawDebugHelpers.h"
+#include "NiagaraComponent.h"
+#include "NiagaraSystem.h"
+
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -23,8 +28,26 @@
 #include "Materials/MaterialParameterCollectionInstance.h"
 #include "ProceduralMeshComponent.h"
 
+static TAutoConsoleVariable<int32> CVarPaintRainCount(
+	TEXT("rain.paint.Count"),
+	3000,
+	TEXT("Drops in the paint rain (Paint Valley, System 1). CarrierCount of them are big drops (they paint puddles); the rest are small drops (they make the puddles they land on spread)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarPaintSmallPaints(
+	TEXT("rain.paint.SmallPaints"),
+	0,
+	TEXT("0: small drops make the puddle they land on spread. 1: every small drop paints a small puddle of its own (for comparing the cost)."),
+	ECVF_Default);
+
+/** Small drops read back per second at most (the rest are sampled: each read-back hit counts for 1 / probability). */
+static constexpr float SmallExportBudget = 6000.0f;
+
 namespace
 {
+	/** Box kinds the rain reads back (the splat's size field): blockers, the target, the ground. */
+	constexpr float KindGround = 3.0f;
+
 	FColor Hex(const TCHAR* Text)
 	{
 		return FColor::FromHex(Text);
@@ -268,6 +291,11 @@ namespace
 		Blocks.ShadowColor = Keep.ShadowColor;
 		Blocks.ShadowAmount = Keep.ShadowAmount;
 		Blocks.GradRange = FVector2D(60.0, 240.0);
+		Blocks.SplatRadius = 9.0f;
+		Blocks.ParSeconds = 35.0f;
+		Blocks.Ink = Hex(TEXT("6ab4ec"));
+		// Blockers in Monument Valley 2's lilac, apart from the blue paint.
+		Blocks.Palettes[Teal] = Palette(TEXT("Lilac"), TEXT("dcc6ec"), TEXT("bd9ad8"), TEXT("9a79bd"), TEXT("775b98"), TEXT("e4dcee"), TEXT("5a4870"), TEXT("ecdcf6"), 0.5f);
 		Levels.Add(Blocks);
 		Levels.Add(Keep);
 		return Levels;
@@ -282,6 +310,10 @@ ARainPaintGame::ARainPaintGame()
 	Surfaces->SetupAttachment(RootComponent);
 	Surfaces->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Surfaces->CastShadow = false;
+	Rain = CreateDefaultSubobject<UNiagaraComponent>(TEXT("Rain"));
+	Rain->SetupAttachment(RootComponent);
+	Rain->bAutoActivate = false;
+	RainSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/Game/RainMagic/Niagara/NS_PaintRain.NS_PaintRain")));
 
 	Levels = DefaultLevels();
 }
@@ -381,6 +413,7 @@ void ARainPaintGame::BeginPlay()
 		PC->bShowMouseCursor = true;
 		PC->SetInputMode(FInputModeGameAndUI());
 	}
+	SetupRain();
 	StartLevel(0);
 
 	if (FParse::Param(FCommandLine::Get(), TEXT("PaintMeasure")) && GEngine)
@@ -392,6 +425,129 @@ void ARainPaintGame::BeginPlay()
 			GEngine->Exec(GetWorld(), Cmd);
 		}
 		MeasureClock = 0.0f;
+		StartRound();
+	}
+}
+
+void ARainPaintGame::SetupRain()
+{
+	UNiagaraSystem* System = RainSystem.LoadSynchronous();
+	if (!System)
+	{
+		UE_LOG(LogTemp, Error, TEXT("RainPaintGame: NS_PaintRain missing (run unreal.RainBuilderLibrary.build_paint_rain_assets())"));
+		return;
+	}
+	RainCount = FMath::Max(CVarPaintRainCount.GetValueOnGameThread(), 0);
+	Rain->SetAsset(System);
+	Rain->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
+	Rain->SetVariableObject(TEXT("RainHitHandler"), this);
+	Rain->SetVariableInt(TEXT("RainGameCount"), RainCount);
+	UploadRain();
+	Rain->Activate(true);
+}
+
+FVector ARainPaintGame::Direction() const
+{
+	const double A = FMath::DegreesToRadians(SteerAzimuth);
+	const double T = FMath::DegreesToRadians(SteerTilt);
+	return FVector(FMath::Sin(T) * FMath::Cos(A), FMath::Sin(T) * FMath::Sin(A), -FMath::Cos(T));
+}
+
+void ARainPaintGame::UploadRain()
+{
+	if (!Rain || !Levels.IsValidIndex(LevelIndex))
+	{
+		return;
+	}
+	const bool bOn = Phase == EPaintPhase::Painting;
+	Rain->SetVariableVec3(TEXT("RainGameDir"), Direction());
+	Rain->SetVariableVec3(TEXT("RainGameCenter"), StreamCenter);
+	Rain->SetVariableFloat(TEXT("RainGameHalf"), StreamRadius);
+	Rain->SetVariableFloat(TEXT("RainGameLength"), 2.0f * StreamRadius);
+	Rain->SetVariableFloat(TEXT("RainGameActive"), bOn ? 1.0f : 0.0f);
+	Rain->SetVariableFloat(TEXT("RainGameScoring"), bOn ? 1.0f : 0.0f);
+	Rain->SetVariableFloat(TEXT("RainPaintSpeed"), RainSpeed);
+	Rain->SetVariableFloat(TEXT("RainPaintCarrierFrac"), RainCount > 0 ? FMath::Min(1.0f, float(CarrierCount) / RainCount) : 0.0f);
+	// Every big drop's hit comes back; the small ones' are sampled to stay within the readback budget (a drop lands
+	// about once per pass through the stream plus its ripple, ~1.3 s).
+	const float SmallHitsPerSecond = FMath::Max(RainCount - CarrierCount, 1) / 1.3f;
+	ExportProb = FMath::Min(1.0f, SmallExportBudget / SmallHitsPerSecond);
+	Rain->SetVariableFloat(TEXT("RainPaintExportProb"), ExportProb);
+	if (Camera)
+	{
+		Rain->SetVariableVec3(TEXT("RainViewFacing"), -Camera->GetActorForwardVector());
+	}
+	Rain->SetVariableLinearColor(TEXT("RainPaintInk"), FLinearColor::FromSRGBColor(Levels[LevelIndex].Ink));
+}
+
+void ARainPaintGame::StartRound()
+{
+	if (Phase == EPaintPhase::Painting)
+	{
+		return;
+	}
+	if (Phase == EPaintPhase::Done)
+	{
+		ResetRound();
+	}
+	Phase = EPaintPhase::Painting;
+	Clock = 0.0f;
+	UploadRain();
+}
+
+void ARainPaintGame::ResetRound()
+{
+	Phase = EPaintPhase::Ready;
+	Clock = 0.0f;
+	PaintHits = 0;
+	SmallHits = 0;
+	SmallFed = 0;
+	MaxHitsPerFrame = 0;
+	Surface.ClearPaint();
+	Surface.Flush();
+	UploadRain();
+}
+
+void ARainPaintGame::SetDirection(float Azimuth, float Tilt)
+{
+	SteerAzimuth = FMath::UnwindDegrees(Azimuth);
+	SteerTilt = FMath::Clamp(Tilt, 0.0f, 180.0f);
+	UploadRain();
+}
+
+void ARainPaintGame::ReceiveParticleData_Implementation(const TArray<FBasicParticleData>& Data, UNiagaraSystem* NiagaraSystem, const FVector& SimulationPositionOffset)
+{
+	if (Phase != EPaintPhase::Painting || !Levels.IsValidIndex(LevelIndex))
+	{
+		return;
+	}
+	MaxHitsPerFrame = FMath::Max(MaxHitsPerFrame, Data.Num());
+	const float Radius = Levels[LevelIndex].SplatRadius;
+	const FVector O = GetActorLocation();
+	const bool bSmallPaints = CVarPaintSmallPaints.GetValueOnGameThread() != 0;
+	for (const FBasicParticleData& P : Data)
+	{
+		// Size carries the kind of box hit (+ 10 for a small drop); every kind takes paint, only the target's counts.
+		const bool bSmall = P.Size > 9.5f;
+		const FVector At = P.Position + SimulationPositionOffset - O;
+		const FVector Dir = P.Velocity.IsNearlyZero() ? Direction() : P.Velocity.GetSafeNormal();
+		const uint32 Seed = SplatSeed++;
+		const float Jitter = 0.85f + 0.3f * float((Seed * 2654435761u) >> 8) / 16777216.0f;
+		if (!bSmall)
+		{
+			Surface.AddPuddle(At, Radius * Jitter, Dir);
+			++PaintHits;
+		}
+		else if (bSmallPaints)
+		{
+			Surface.AddPuddle(At, SmallPuddleRadius * Jitter, Dir);
+			++SmallHits;
+		}
+		else
+		{
+			++SmallHits;
+			SmallFed += Surface.Feed(At, 1.0f / FMath::Max(ExportProb, 1e-3f)) ? 1 : 0;
+		}
 	}
 }
 
@@ -403,7 +559,9 @@ void ARainPaintGame::TickMeasure(float DeltaSeconds)
 	}
 	const float RealDt = float(FApp::GetDeltaTime());
 	MeasureClock += RealDt;
-	if (MeasureClock < 4.0f)
+	float Settle = 4.0f;
+	FParse::Value(FCommandLine::Get(), TEXT("PaintMeasureSettle="), Settle);
+	if (MeasureClock < Settle)
 	{
 		return;
 	}
@@ -429,11 +587,11 @@ void ARainPaintGame::TickMeasure(float DeltaSeconds)
 		MeasureRenderMs += Unit->RawRenderThreadTime;
 		MeasureGpuMs += Unit->RawGPUFrameTime[0];
 	}
-	if (MeasureClock >= 9.0f)
+	if (MeasureClock >= Settle + 5.0f)
 	{
 		const double N = FMath::Max(MeasureFrames, 1);
-		const FString Line = FString::Printf(TEXT("PAINTMEASURE level=%d frames=%d frame_ms=%.2f game_ms=%.2f render_ms=%.2f gpu_ms=%.2f"),
-			LevelIndex, MeasureFrames, MeasureFrameMs / N, MeasureGameMs / N, MeasureRenderMs / N, MeasureGpuMs / N);
+		const FString Line = FString::Printf(TEXT("PAINTMEASURE level=%d frames=%d frame_ms=%.2f game_ms=%.2f render_ms=%.2f gpu_ms=%.2f puddles=%d coverage=%.3f"),
+			LevelIndex, MeasureFrames, MeasureFrameMs / N, MeasureGameMs / N, MeasureRenderMs / N, MeasureGpuMs / N, Surface.NumPuddles(), GetCoverage());
 		UE_LOG(LogTemp, Display, TEXT("%s"), *Line);
 		FFileHelper::SaveStringToFile(Line + TEXT("\n"), *(FPaths::ProjectSavedDir() / TEXT("Sweeps/PaintMeasure.txt")), FFileHelper::EEncodingOptions::AutoDetect, &IFileManager::Get(), FILEWRITE_Append);
 		MeasureClock = -1.0f;
@@ -479,6 +637,33 @@ void ARainPaintGame::BuildLevel()
 	Atlas = Surface.GetAtlas();
 	Surface.BuildMesh(Surfaces, L.Palettes.Num(), L.Spires, L.Ribbons);
 	BuildSeconds = FPlatformTime::Seconds() - T0;
+
+	// The rain's stream: a cylinder around the level's bounding sphere, along any direction.
+	const FBox Bounds = Surface.Bounds();
+	StreamCenter = O + Bounds.GetCenter();
+	StreamRadius = float(Bounds.GetExtent().Size()) + 20.0f;
+	const TArray<FPaintBox> Collide = Surface.CollisionBoxes();
+	BoxesUsed = Collide.Num();
+	if (BoxesUsed > RainShield::MaxBoxes)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RainPaintGame: level %s has %d collision boxes, the rain tests only %d"), *L.Name, BoxesUsed, RainShield::MaxBoxes);
+	}
+	if (Rain)
+	{
+		for (int32 i = 0; i < RainShield::MaxBoxes; ++i)
+		{
+			const bool bUsed = Collide.IsValidIndex(i);
+			const float Kind = !bUsed ? RainShield::BoxNone : Collide[i].Kind == EPaintBoxKind::Target ? RainShield::BoxProtected
+				: Collide[i].Kind == EPaintBoxKind::Blocker ? RainShield::BoxBlocker : KindGround;
+			Rain->SetVariableVec3(*FString::Printf(TEXT("RainBox%dMin"), i), bUsed ? O + Collide[i].Min : FVector(1e6));
+			Rain->SetVariableVec3(*FString::Printf(TEXT("RainBox%dMax"), i), bUsed ? O + Collide[i].Max : FVector(-1e6));
+			Rain->SetVariableFloat(*FString::Printf(TEXT("RainBox%dKind"), i), Kind);
+		}
+	}
+	Phase = EPaintPhase::Ready;
+	Clock = 0.0f;
+	PaintHits = 0;
+	UploadRain();
 
 	// One material per palette for the faces (with the atlas) and one for the spires (without).
 	Materials.Reset();
@@ -593,6 +778,22 @@ void ARainPaintGame::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 	HandleInput(DeltaSeconds);
 	TickMeasure(DeltaSeconds);
+	if (Rain && CVarPaintRainCount.GetValueOnGameThread() != RainCount)
+	{
+		SetupRain();
+	}
+	if (Phase == EPaintPhase::Painting)
+	{
+		Clock += DeltaSeconds;
+		if (GetCoverage() >= CoverageGoal && MeasureClock < 0.0f)
+		{
+			Phase = EPaintPhase::Done;
+		}
+	}
+	Surface.Tick(DeltaSeconds);
+	Surface.Flush();
+	UploadRain();
+	ShowHud();
 	FVector2D Size(16.0, 9.0);
 	if (GEngine && GEngine->GameViewport)
 	{
@@ -624,6 +825,55 @@ void ARainPaintGame::HandleInput(float DeltaSeconds)
 	if (Pressed(EKeys::MouseScrollDown)) { ViewHeight = FMath::Min(ViewHeight / 0.9f, 2000.0f); UpdateCamera(); }
 	if (Pressed(EKeys::PageUp)) StartLevel(LevelIndex + 1);
 	if (Pressed(EKeys::PageDown)) StartLevel(LevelIndex - 1);
+
+	// Steering, any time: A/D (or left/right) turn the rain around the vertical, W/S (or up/down) tilt it.
+	auto Axis = [PC](const FKey& Plus, const FKey& Plus2, const FKey& Minus, const FKey& Minus2)
+	{
+		return (PC->IsInputKeyDown(Plus) || PC->IsInputKeyDown(Plus2) ? 1.0f : 0.0f) - (PC->IsInputKeyDown(Minus) || PC->IsInputKeyDown(Minus2) ? 1.0f : 0.0f);
+	};
+	SteerAzimuth = FMath::UnwindDegrees(SteerAzimuth + SteerYawRate * DeltaSeconds * Axis(EKeys::D, EKeys::Right, EKeys::A, EKeys::Left));
+	SteerTilt = FMath::Clamp(SteerTilt + SteerTiltRate * DeltaSeconds * Axis(EKeys::W, EKeys::Up, EKeys::S, EKeys::Down), 0.0f, 180.0f);
+	if (Pressed(EKeys::Enter) || Pressed(EKeys::SpaceBar))
+	{
+		if (Phase == EPaintPhase::Done && Pressed(EKeys::Enter))
+		{
+			StartLevel(LevelIndex + 1);
+		}
+		else
+		{
+			StartRound();
+		}
+	}
+	if (Pressed(EKeys::R)) ResetRound();
+}
+
+void ARainPaintGame::ShowHud() const
+{
+	if (!GEngine || !Levels.IsValidIndex(LevelIndex))
+	{
+		return;
+	}
+	const FPaintLevel& L = Levels[LevelIndex];
+	const FColor Ink = L.Ink;
+	// The rain's direction: an arrow coming in from upwind.
+	const FVector D = Direction();
+	DrawDebugDirectionalArrow(GetWorld(), StreamCenter - D * (0.95f * StreamRadius), StreamCenter - D * (0.6f * StreamRadius), 30.0f, Ink, false, -1.0f, SDPG_Foreground, 4.0f);
+	const int32 Stars = Clock <= L.ParSeconds ? 3 : Clock <= 1.5f * L.ParSeconds ? 2 : 1;
+	FString Line;
+	switch (Phase)
+	{
+	case EPaintPhase::Ready:
+		Line = FString::Printf(TEXT("%s  -  aim with WASD / arrows, Enter: rain  (goal %.0f%%, par %.0f s)"), *L.Name, 100.0f * CoverageGoal, L.ParSeconds);
+		break;
+	case EPaintPhase::Painting:
+		Line = FString::Printf(TEXT("%s  -  %.1f s   painted %.1f%% / %.0f%%"), *L.Name, Clock, 100.0f * GetCoverage(), 100.0f * CoverageGoal);
+		break;
+	case EPaintPhase::Done:
+		Line = FString::Printf(TEXT("%s  -  done in %.1f s  %s   (R: again, Enter: next level)"), *L.Name, Clock, Stars == 3 ? TEXT("***") : Stars == 2 ? TEXT("**") : TEXT("*"));
+		break;
+	}
+	GEngine->AddOnScreenDebugMessage(9100, 0.0f, FColor(60, 40, 60), Line, false, FVector2D(1.4, 1.4));
+	GEngine->AddOnScreenDebugMessage(9101, 0.0f, FColor(90, 80, 90), FString::Printf(TEXT("rain from azimuth %.0f, tilt %.0f    Q/E: turn the view    PgUp/PgDn: level"), SteerAzimuth, SteerTilt));
 }
 
 FString ARainPaintGame::Describe() const
@@ -638,7 +888,7 @@ FString ARainPaintGame::Describe() const
 		}
 		Collide += 3 * Levels[LevelIndex].Arches.Num();
 	}
-	return FString::Printf(TEXT("level=%d faces=%d texels=%d visible=%d atlas=%dx%d build=%.3fs yaw=%.1f height=%.0f aspect=%.3f collide=%d target=%.0fcm2"),
+	return FString::Printf(TEXT("level=%d faces=%d texels=%d visible=%d atlas=%dx%d build=%.3fs yaw=%.1f height=%.0f aspect=%.3f collide=%d target=%.0fcm2 phase=%d clock=%.2f coverage=%.4f bighits=%d smallhits=%d fed=%d maxhits=%d drops=%d exportprob=%.3f puddles=%d growing=%d"),
 		LevelIndex, Surface.NumFaces(), Surface.NumTexels(), Surface.NumVisibleTexels(), Surface.GetAtlasWidth(), Surface.GetAtlasHeight(), BuildSeconds, ViewYaw, ViewHeight, ViewAspect,
-		Collide, Surface.TargetAreaCm2());
+		Collide, Surface.TargetAreaCm2(), int32(Phase), Clock, GetCoverage(), PaintHits, SmallHits, SmallFed, MaxHitsPerFrame, RainCount, ExportProb, Surface.NumPuddles(), Surface.NumGrowing());
 }

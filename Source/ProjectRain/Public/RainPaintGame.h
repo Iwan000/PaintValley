@@ -6,8 +6,12 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "NiagaraDataInterfaceExport.h"
 #include "PaintSurface.h"
 #include "RainPaintGame.generated.h"
+
+class UNiagaraComponent;
+class UNiagaraSystem;
 
 class ACameraActor;
 class UMaterialInstanceDynamic;
@@ -16,6 +20,17 @@ class UMaterialParameterCollection;
 class UProceduralMeshComponent;
 class UStaticMeshComponent;
 class UTexture2D;
+
+UENUM(BlueprintType)
+enum class EPaintPhase : uint8
+{
+	/** Aim the rain; the clock waits. */
+	Ready,
+	/** It rains paint; the clock runs until the coverage goal. */
+	Painting,
+	/** The goal is reached: the time is the score. */
+	Done,
+};
 
 /** Monument Valley tones of one material (sRGB colours, as sampled from the references). */
 USTRUCT(BlueprintType)
@@ -82,10 +97,13 @@ struct FPaintLevel
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") FVector ViewTarget = FVector(0.0, 0.0, 70.0);
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float ViewHeight = 700.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") FColor Ink = FColor(0x6a, 0x3c, 0xff);
+	/** Radius a carrier's puddle spreads to (cm) and the time for three stars (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float SplatRadius = 6.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Paint") float ParSeconds = 30.0f;
 };
 
 UCLASS()
-class PROJECTRAIN_API ARainPaintGame : public AActor
+class PROJECTRAIN_API ARainPaintGame : public AActor, public INiagaraParticleCallbackHandler
 {
 	GENERATED_BODY()
 
@@ -96,7 +114,22 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
+	/** Export Particle Data calls this on the game thread with the paint carriers that hit a box (a few frames late). */
+	virtual void ReceiveParticleData_Implementation(const TArray<FBasicParticleData>& Data, UNiagaraSystem* NiagaraSystem, const FVector& SimulationPositionOffset) override;
+
 	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UProceduralMeshComponent> Surfaces;
+	UPROPERTY(VisibleAnywhere, Category = "Paint") TObjectPtr<UNiagaraComponent> Rain;
+	UPROPERTY(EditAnywhere, Category = "Paint") TSoftObjectPtr<UNiagaraSystem> RainSystem;
+	/** Big drops (they paint puddles; the rest of rain.paint.Count are small drops that make puddles spread). */
+	UPROPERTY(EditAnywhere, Category = "Paint") int32 CarrierCount = 300;
+	/** With rain.paint.SmallPaints 1: the puddle a small drop paints (cm). */
+	UPROPERTY(EditAnywhere, Category = "Paint") float SmallPuddleRadius = 4.0f;
+	UPROPERTY(EditAnywhere, Category = "Paint") float RainSpeed = 700.0f;
+	/** Share of the target's visible surface that ends the round. */
+	UPROPERTY(EditAnywhere, Category = "Paint") float CoverageGoal = 0.9f;
+	/** Steering rates (degrees per second): around the vertical and away from straight down. */
+	UPROPERTY(EditAnywhere, Category = "Paint") float SteerYawRate = 100.0f;
+	UPROPERTY(EditAnywhere, Category = "Paint") float SteerTiltRate = 70.0f;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialInterface> SurfaceMaterial;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialInterface> BackdropMaterial;
 	UPROPERTY(EditAnywhere, Category = "Paint") TObjectPtr<UMaterialParameterCollection> Collection;
@@ -110,9 +143,23 @@ public:
 	/** Sets the view at once (Python, screenshots): yaw in degrees, height in cm (0 keeps the level's). */
 	UFUNCTION(BlueprintCallable, Category = "Paint") void SetView(float Yaw, float Height = 0.0f);
 	UFUNCTION(BlueprintPure, Category = "Paint") FString Describe() const;
+	/** Starts the rain and the clock (Enter). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void StartRound();
+	/** Clears the paint and waits again (R). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void ResetRound();
+	/** The rain's direction: Azimuth around the vertical, Tilt away from straight down (degrees, 0..180). */
+	UFUNCTION(BlueprintCallable, Category = "Paint") void SetDirection(float Azimuth, float Tilt);
+	UFUNCTION(BlueprintPure, Category = "Paint") float GetCoverage() const { return Surface.TargetCoverage(); }
+	UFUNCTION(BlueprintPure, Category = "Paint") float GetClock() const { return Clock; }
+	UFUNCTION(BlueprintPure, Category = "Paint") EPaintPhase GetPhase() const { return Phase; }
+	UFUNCTION(BlueprintPure, Category = "Paint") int32 GetPaintHits() const { return PaintHits; }
 
 private:
 	void BuildLevel();
+	void SetupRain();
+	void UploadRain();
+	FVector Direction() const;
+	void ShowHud() const;
 	void UpdateCamera();
 	void HandleInput(float DeltaSeconds);
 
@@ -127,6 +174,21 @@ private:
 
 	int32 LevelIndex = 0;
 	FPaintSurface Surface;
+	EPaintPhase Phase = EPaintPhase::Ready;
+	float Clock = 0.0f;
+	float SteerAzimuth = 45.0f;
+	float SteerTilt = 25.0f;
+	int32 PaintHits = 0;
+	int32 SmallHits = 0;
+	int32 SmallFed = 0;
+	float ExportProb = 1.0f;
+	int32 MaxHitsPerFrame = 0;
+	uint32 SplatSeed = 1;
+	int32 RainCount = 0;
+	int32 BoxesUsed = 0;
+	/** The stream around the level (world space): centre, disc radius, length. */
+	FVector StreamCenter = FVector::ZeroVector;
+	float StreamRadius = 300.0f;
 	float TargetYaw = 45.0f;
 	float ViewHeight = 700.0f;
 	float ViewAspect = 0.0f;

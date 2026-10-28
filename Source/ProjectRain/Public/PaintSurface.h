@@ -1,7 +1,7 @@
 // Project Rain - Paint Valley: the paintable surfaces of a level. A level is a set of axis-aligned boxes (the
 // Monument Valley architecture: towers, walls, steps, merlons, a floating base). Every face a box shows gets its
 // own rectangle of texels in one atlas texture, so the whole level is one procedural mesh and one texture:
-//   R  paint (0..1, written by splats at run time)
+//   R  paint (the puddles' metaball field over twice the paint level: 0.5 on the edge, written at run time)
 //   G  ambient occlusion (baked when the level is built: rays against the boxes)
 //   B  openings (doors, windows, portholes stamped onto faces: signed-distance mask, sharpened in the material)
 //   A  edge light (thin highlight along the convex top edges)
@@ -140,16 +140,36 @@ public:
 	 *  palette p (no atlas). */
 	void BuildMesh(UProceduralMeshComponent* Mesh, int32 NumPalettes, const TArray<FPaintSpire>& Spires, const TArray<FPaintRibbon>& Ribbons) const;
 
-	/** Paints a splat (mesh-component space): every visible texel within Radius of At (a blobby outline, its own
-	 *  shape per Seed), on faces not turned away from the incoming direction Dir. Returns the texels newly painted. */
-	int32 Splat(const FVector& At, float Radius, const FVector& Dir, uint32 Seed);
+	/** A drop lands (mesh-component space): a puddle that spreads from At to Radius (cm) over about 3 * SpreadTime, on
+	 *  the faces around it that are not turned away from the incoming direction Dir. Puddles are metaballs: each adds
+	 *  a smooth bump, (1 - (d / R)^2)^3, to the paint field, and the paint shows where the field reaches PaintLevel.
+	 *  One alone is a circle of Radius; two close ones flow together through a neck before they touch. */
+	void AddPuddle(const FVector& At, float Radius, const FVector& Dir);
+	/** A small drop lands at At: if it is on a puddle (the one whose edge it is deepest inside), that puddle will
+	 *  grow by Weight * FeedArea cm^2 of surface. Returns whether it landed on paint. */
+	bool Feed(const FVector& At, float Weight);
+	/** Applies the fed growth (every FeedPeriod s) and spreads the puddles still growing. */
+	void Tick(float DeltaSeconds);
 	/** Clears the paint (keeps the bake). */
 	void ClearPaint();
+	int32 NumGrowing() const { return Growing.Num(); }
+	int32 NumPuddles() const { return Puddles.Num(); }
+
+	/** Seconds for a puddle to cover 63 % of the way to its size. */
+	float SpreadTime = 0.35f;
+	/** Surface a puddle gains per small drop that lands on it (cm^2), applied in batches every FeedPeriod s. */
+	float FeedArea = 12.0f;
+	float FeedPeriod = 0.15f;
 	/** Painted share of the target's visible surface (area-weighted, 0..1). */
 	float TargetCoverage() const { return TargetArea > 0.0 ? float(TargetPainted / TargetArea) : 0.0f; }
 	float TargetAreaCm2() const { return float(TargetArea); }
 	/** Uploads the tiles that changed since the last call (one texture region per tile). */
 	void Flush();
+
+	/** The boxes in the particles' collision set (the level's and the arches' solid parts), mesh-component space. */
+	TArray<FPaintBox> CollisionBoxes() const { return Boxes.FilterByPredicate([](const FPaintBox& B) { return B.bCollide; }); }
+	/** Bounds of every box. */
+	FBox Bounds() const;
 
 	UTexture2D* GetAtlas() const { return Atlas; }
 	int32 GetAtlasWidth() const { return AtlasW; }
@@ -213,6 +233,35 @@ private:
 	void WriteTile(int32 FaceIndex);
 
 	FIntVector HashCell(const FVector& P) const;
+	/** Adds the bump of a puddle grown from radius From to To (kernel radii) to the field around At. */
+	void Spread(const FVector& At, const FVector& In, float From, float To);
+
+	struct FPuddle
+	{
+		FVector At = FVector::ZeroVector;
+		FVector In = FVector::ZeroVector;
+		/** Kernel radius it is growing to, the radius on its way there, and the radius stamped into the field. */
+		float Full = 0.0f;
+		float Shown = 0.0f;
+		float Now = 0.0f;
+		/** Surface fed by small drops, not yet applied (cm^2). */
+		float Pending = 0.0f;
+		bool bGrowing = false;
+	};
+	FIntVector PuddleCell(const FVector& P) const;
+	TArray<FPuddle> Puddles;
+	/** Puddles still spreading (indices). */
+	TArray<int32> Growing;
+	/** Puddles by the cell of their centre (PuddleCellSize cm), and the largest edge radius. */
+	TMap<FIntVector, TArray<int32>> PuddleHash;
+	static constexpr float PuddleCellSize = 16.0f;
+	float MaxEdge = 0.0f;
+	float FeedClock = 0.0f;
+	/** The paint field per texel (sum of the puddles' bumps); atlas R = Field / (2 PaintLevel). */
+	TArray<float> Field;
+	static constexpr float PaintLevel = 0.125f;
+	/** A lone puddle's edge lies at this share of its kernel radius: sqrt(1 - PaintLevel^(1/3)). */
+	static constexpr float EdgeShare = 0.7071f;
 
 	TArray<FPaintBox> Boxes;
 	/** Visible texels by hash cell (HashSize cm). */

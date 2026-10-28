@@ -1298,3 +1298,173 @@ FString URainBuilderLibrary::BuildPaintAssets()
 	bOk &= BuildPaintBackdropMaterial(Report) != nullptr;
 	return FString::Printf(TEXT("%s\n%s"), Report.Contains(TEXT("ERROR")) ? TEXT("FAILED") : TEXT("SUCCESS"), *Report);
 }
+
+// ---------------------------------------------------------------------------------------------- Paint Valley rain
+// System 1 of the paint game: GPU ink rain steered by the player, the paint carriers' hits read back.
+
+namespace
+{
+	struct FPaintRainConfig
+	{
+		int32 Seed = 97;
+		/** Seconds for a drop's velocity to turn towards a new direction. */
+		float SteerTau = 0.25f;
+		/** Big and small drops: bead width (cm), streak length per cm/s of speed (s), the small ones' opacity. */
+		float BigWidth = 3.2f;
+		float BigStreak = 0.03f;
+		float SmallWidth = 1.3f;
+		float SmallStreak = 0.035f;
+		float SmallAlpha = 0.7f;
+		/** Ripples: seconds, diameter (cm) of a small and a big drop's ring, opacity. */
+		float RippleLife = 0.5f;
+		float RippleSize = 9.0f;
+		float RippleSizeBig = 16.0f;
+		float RippleAlpha = 0.6f;
+	};
+
+	UMaterial* BuildPaintDropMaterial(FString& Report)
+	{
+		UMaterial* M = GetOrCreateMaterial(RainRoot / TEXT("Materials"), TEXT("M_PaintDrop"));
+		M->MaterialDomain = MD_Surface;
+		M->BlendMode = BLEND_Translucent;
+		M->SetShadingModel(MSM_Unlit);
+		M->TwoSided = true;
+		M->bUsedWithNiagaraSprites = true;
+		UMaterialExpressionCustom* Custom = AddCustom(M, TEXT("Materials/HLSL/PaintDrop.hlsl"), CMOT_Float4);
+		UMaterialExpressionTextureCoordinate* UV = AddExpr<UMaterialExpressionTextureCoordinate>(M, -900, -200);
+		AddCustomInput(Custom, TEXT("UV"), UV);
+		UMaterialExpressionParticleColor* PColor = AddExpr<UMaterialExpressionParticleColor>(M, -900, -100);
+		AddCustomInput(Custom, TEXT("PColor"), PColor, 5);
+		UMaterialExpressionDynamicParameter* Dyn = AddExpr<UMaterialExpressionDynamicParameter>(M, -900, 0);
+		Dyn->ParamNames = { TEXT("Kind"), TEXT("WidthOverLength"), TEXT("RippleAge"), TEXT("Unused3") };
+		AddCustomInput(Custom, TEXT("DynX"), Dyn, 0);
+		AddCustomInput(Custom, TEXT("DynY"), Dyn, 1);
+		AddCustomInput(Custom, TEXT("DynZ"), Dyn, 2);
+		UMaterialExpressionComponentMask* RGB = AddExpr<UMaterialExpressionComponentMask>(M, 0, -60);
+		RGB->R = RGB->G = RGB->B = true;
+		RGB->A = false;
+		RGB->Input.Connect(0, Custom);
+		UMaterialExpressionComponentMask* A = AddExpr<UMaterialExpressionComponentMask>(M, 0, 60);
+		A->R = A->G = A->B = false;
+		A->A = true;
+		A->Input.Connect(0, Custom);
+		UMaterialEditingLibrary::ConnectMaterialProperty(RGB, TEXT(""), MP_EmissiveColor);
+		UMaterialEditingLibrary::ConnectMaterialProperty(A, TEXT(""), MP_Opacity);
+		CompileMaterialAndReport(M, Report);
+		return M;
+	}
+
+	FString FillPaintRain(FString Text, const FPaintRainConfig& P)
+	{
+		FGameRainConfig G;
+		G.Seed = P.Seed;
+		Text = FillGame(Text, G);
+		auto F = [](float V) { return FString::Printf(TEXT("%.4f"), V); };
+		Text.ReplaceInline(TEXT("$(STEER_TAU)"), *F(P.SteerTau));
+		Text.ReplaceInline(TEXT("$(BIG_WIDTH)"), *F(P.BigWidth));
+		Text.ReplaceInline(TEXT("$(BIG_STREAK)"), *F(P.BigStreak));
+		Text.ReplaceInline(TEXT("$(SMALL_WIDTH)"), *F(P.SmallWidth));
+		Text.ReplaceInline(TEXT("$(SMALL_STREAK)"), *F(P.SmallStreak));
+		Text.ReplaceInline(TEXT("$(SMALL_ALPHA)"), *F(P.SmallAlpha));
+		Text.ReplaceInline(TEXT("$(RIPPLE_LIFE)"), *F(P.RippleLife));
+		Text.ReplaceInline(TEXT("$(RIPPLE_SIZE)"), *F(P.RippleSize));
+		Text.ReplaceInline(TEXT("$(RIPPLE_SIZE_BIG)"), *F(P.RippleSizeBig));
+		Text.ReplaceInline(TEXT("$(RIPPLE_ALPHA)"), *F(P.RippleAlpha));
+		return Text;
+	}
+}
+
+FString URainBuilderLibrary::BuildPaintRainAssets(int32 RainCount)
+{
+	FString Report;
+	UMaterial* Material = BuildPaintDropMaterial(Report);
+	const FPaintRainConfig Config;
+	const FString ModPath = RainRoot / TEXT("Niagara/Modules");
+	UNiagaraScript* Spawn = CreateHlslModule(ModPath, TEXT("NM_PaintRainSpawn"), FillPaintRain(LoadTextFile(TEXT("Niagara/HLSL/PaintRainSpawn.hlsl")), Config),
+		TEXT("Paint Valley: ink drops spread through the stream"), ParticleModuleMask);
+	UNiagaraScript* Update = CreateHlslModule(ModPath, TEXT("NM_PaintRainUpdate"), FillPaintRain(LoadTextFile(TEXT("Niagara/HLSL/PaintRainUpdate.hlsl")), Config),
+		TEXT("Paint Valley: steer, boxes, paint hits, recycle"), ParticleModuleMask);
+	SaveAsset(Spawn);
+	SaveAsset(Update);
+	const FGameExportInputs Inputs = FindExportInputs(Report);
+
+	UNiagaraSystem* System = CreateSystemAsset(RainRoot / TEXT("Niagara"), TEXT("NS_PaintRain"));
+	AddGameUserParameters(System, RainCount);
+	{
+		auto Add = [System](FNiagaraVariable Var) { Var.SetName(*(TEXT("User.") + Var.GetName().ToString())); AddUserParameter(System, Var); };
+		FNiagaraVariable Speed(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintSpeed"));
+		Speed.SetValue(700.0f);
+		Add(Speed);
+		FNiagaraVariable Frac(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintCarrierFrac"));
+		Frac.SetValue(0.003f);
+		Add(Frac);
+		FNiagaraVariable Ink(FNiagaraTypeDefinition::GetColorDef(), TEXT("RainPaintInk"));
+		Ink.SetValue(FLinearColor(0.15f, 0.45f, 0.85f, 1.0f));
+		Add(Ink);
+		FNiagaraVariable Prob(FNiagaraTypeDefinition::GetFloatDef(), TEXT("RainPaintExportProb"));
+		Prob.SetValue(1.0f);
+		Add(Prob);
+		FNiagaraVariable Facing(FNiagaraTypeDefinition::GetVec3Def(), TEXT("RainViewFacing"));
+		Facing.SetValue(FVector3f(-0.577f, -0.577f, 0.577f));
+		Add(Facing);
+	}
+
+	UNiagaraEmitter* Emitter = CreateEmptyEmitter(TEXT("PaintRain"), false);
+	FVersionedNiagaraEmitterData* D = Emitter->GetLatestEmitterData();
+	D->SimTarget = ENiagaraSimTarget::GPUComputeSim;
+	D->bLocalSpace = false;
+	D->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed;
+	D->FixedBounds = FBox(FVector(-5000.0), FVector(5000.0));
+	UNiagaraNodeFunctionCall* State = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/EmitterState.EmitterState"));
+	SetModuleInputFloat(Emitter, *D, ENiagaraScriptUsage::EmitterUpdateScript, State, TEXT("Loop Duration"), 1.0e7f);
+	UNiagaraNodeFunctionCall* Burst = AddModuleByPath(*D, ENiagaraScriptUsage::EmitterUpdateScript, TEXT("/Niagara/Modules/Emitter/SpawnBurst_Instantaneous.SpawnBurst_Instantaneous"));
+	const bool bCountLinked = LinkModuleInput(Burst, TEXT("Spawn Count"), FNiagaraTypeDefinition::GetIntDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetIntDef(), TEXT("User.RainGameCount")));
+	LinkModuleInput(Burst, TEXT("Age"), FNiagaraTypeDefinition::GetFloatDef(), FNiagaraVariableBase(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Emitter.LoopedAge")));
+
+	const FNiagaraTypeDefinition F = FNiagaraTypeDefinition::GetFloatDef();
+	const FNiagaraTypeDefinition V3 = FNiagaraTypeDefinition::GetVec3Def();
+	const FNiagaraTypeDefinition V4 = FNiagaraTypeDefinition::GetVec4Def();
+	TArray<FNiagaraVariable> Attributes = {
+		FNiagaraVariable(FNiagaraTypeDefinition::GetPositionDef(), TEXT("Particles.Position")),
+		FNiagaraVariable(V3, TEXT("Particles.Velocity")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetColorDef(), TEXT("Particles.Color")),
+		FNiagaraVariable(FNiagaraTypeDefinition::GetVec2Def(), TEXT("Particles.SpriteSize")),
+		FNiagaraVariable(V3, TEXT("Particles.SpriteAlignment")),
+		FNiagaraVariable(V4, TEXT("Particles.DynamicMaterialParameter")),
+		FNiagaraVariable(V4, TEXT("Particles.RainRand")),
+		FNiagaraVariable(F, TEXT("Particles.RainTimer")),
+		FNiagaraVariable(F, TEXT("Particles.PaintAge")),
+		FNiagaraVariable(F, TEXT("Particles.PaintKind")),
+		FNiagaraVariable(F, TEXT("Particles.PaintCarrier")),
+		FNiagaraVariable(F, TEXT("Particles.PaintRipple")),
+		FNiagaraVariable(V3, TEXT("Particles.PaintNormal")),
+		FNiagaraVariable(V3, TEXT("Particles.SpriteFacing")),
+		FNiagaraVariable(GameHitParam),
+		FNiagaraVariable(Inputs.PositionType, TEXT("Particles.RainGameHitPos")),
+	};
+	TArray<FString> Defaults;
+	Defaults.SetNum(Attributes.Num());
+	AddAttributeDeclarations(*D, ENiagaraScriptUsage::ParticleSpawnScript, Attributes, Defaults);
+	AddModule(*D, ENiagaraScriptUsage::ParticleSpawnScript, Spawn);
+	AddModule(*D, ENiagaraScriptUsage::ParticleUpdateScript, Update);
+	// After the update: the carriers that hit a box this frame (hit point, box kind as size, velocity).
+	const FNiagaraVariableBase Velocity(Inputs.VelocityType, TEXT("Particles.Velocity"));
+	const bool bExportLinked = AddExportModule(Emitter, *D, Inputs, FNiagaraVariableBase(F, TEXT("Particles.PaintKind")), &Velocity);
+
+	// Drops face the camera (User.RainViewFacing), rings lie on the face they landed on: a custom facing for both.
+	UNiagaraSpriteRendererProperties* Sprite = NewObject<UNiagaraSpriteRendererProperties>(Emitter, TEXT("InkSprites"));
+	Sprite->Material = Material;
+	Sprite->Alignment = ENiagaraSpriteAlignment::CustomAlignment;
+	Sprite->FacingMode = ENiagaraSpriteFacingMode::CustomFacingVector;
+	Sprite->SortMode = ENiagaraSortMode::ViewDepth;
+	Sprite->bSortOnlyWhenTranslucent = true;
+	Sprite->bCastShadows = false;
+	Emitter->AddRenderer(Sprite, D->Version.VersionGuid);
+
+	FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, Emitter->GetExposedVersion().VersionGuid, true);
+	const bool bOk = CompileAndReport(System, Report);
+	SaveAsset(System);
+	Report += FString::Printf(TEXT("Emitter PaintRain: User.RainGameCount drops (%s), %d boxes, carrier hit export %s\n"),
+		bCountLinked ? TEXT("linked") : TEXT("COUNT NOT LINKED"), RainShield::MaxBoxes, bExportLinked ? TEXT("linked") : TEXT("NOT LINKED"));
+	return FString::Printf(TEXT("%s\n%s"), bOk && !Report.Contains(TEXT("ERROR")) ? TEXT("SUCCESS") : TEXT("FAILED"), *Report);
+}
