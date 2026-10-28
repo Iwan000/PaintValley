@@ -1,6 +1,6 @@
 ---
 title: "Paint Valley — Niagara at Scale: Performance Report"
-author: "Iwan000 · cg401@duke.edu · Oct 2026"
+author: "Cheng Guo · cg401@duke.edu · Oct 2026 · developed in collaboration with Claude Opus 5.5 (Anthropic)"
 ---
 
 **Paint Valley** (UE 5.7, C++ + Niagara) is a standalone game in Track B's form: one mechanic, two particle configurations, switched at runtime (Tab). Instead of a flock, the player steers a stream of paint. Grid-block structures float in Monument Valley's style. The player turns a trackball to aim the paint, and the clock runs until 90 % of the cream target blocks are painted. Blockers and the ground take no paint, and the pool of paint can run out. The mechanic borrows from *Auditorium*: a particle stream bent by the player until it fills its targets.

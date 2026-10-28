@@ -173,6 +173,14 @@ public:
 	/** One bit per face of a box that takes no more paint: +X 1, -X 2, +Y 4, -Y 8, +Z 16, -Z 32. A face is full when
 	 *  FullShare of its scored texels are painted, or when it has none (buried, facing down, or not the target's). */
 	int32 FullFaces(int32 Box) const;
+	/** For the demo's player: the target's face (not full, not in Skip) with the most bare scored texels, or INDEX_NONE;
+	 *  a face turned away from the view (View: the camera's forward vector) counts HiddenWeight times its bare texels.
+	 *  Samples: up to MaxSamples of its bare texels, spread over it; Normal: its outward normal (mesh-component space). */
+	int32 BarestFace(const TSet<int32>& Skip, const FVector& View, float HiddenWeight, TArray<FVector>& Samples, FVector& Normal, int32 MaxSamples = 9) const;
+	/** Painted scored texels of a face (BarestFace's index). */
+	int32 FacePainted(int32 FaceIndex) const { return Faces.IsValidIndex(FaceIndex) ? Faces[FaceIndex].Painted : 0; }
+	/** Whether a ray from At along Dir (a unit vector) leaves the level without meeting a box of the collision set. */
+	bool IsOpen(const FVector& At, const FVector& Dir) const;
 	/** Painted share of the target's visible surface (area-weighted, 0..1). */
 	float TargetCoverage() const { return TargetArea > 0.0 ? float(TargetPainted / TargetArea) : 0.0f; }
 	float TargetAreaCm2() const { return float(TargetArea); }

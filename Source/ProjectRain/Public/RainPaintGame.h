@@ -275,7 +275,7 @@ private:
 	double MeasureFrameMs = 0.0, MeasureGameMs = 0.0, MeasureRenderMs = 0.0, MeasureGpuMs = 0.0;
 	TSharedPtr<FParticlePerfStatsListener_GatherAll, ESPMode::ThreadSafe> MeasureListener;
 
-	// Demo (-PaintDemo): timed steps, a caption on the HUD, the direction turning slowly.
+	// Demo (-PaintDemo): timed steps, a caption on the HUD, a player that aims where the paint is missing.
 	struct FDemoStep
 	{
 		float At = 0.0f;
@@ -286,10 +286,26 @@ private:
 	float DemoClock = -1.0f;
 	float PendingDemoDelay = -1.0f;
 	bool bQuitAfterDemo = false;
-	/** Degrees per second the demo turns the rain's azimuth. */
-	float DemoSpin = 0.0f;
 	FString DemoCaption;
 	void TickDemo(float DeltaSeconds);
+	/** The demo's player (bDemoSeek): every few seconds it finds the target's barest face that the rain can reach (the
+	 *  sides out of sight count more: it goes and looks), turns the view a quarter (as Q / E) when that face is out of
+	 *  sight, then steers the rain there, never in one jump (as the trackball would). A face still filling up keeps the
+	 *  rain once more; one that gets no paint while aimed at is left for the rest of the round. */
+	bool bDemoSeek = false;
+	float DemoSeekClock = 0.0f;
+	float DemoSeekEpoch = -1.0f;
+	int32 DemoSeekFace = INDEX_NONE;
+	int32 DemoSeekPainted = 0;
+	int32 DemoSeekHolds = 0;
+	TSet<int32> DemoSeekSkip;
+	bool bDemoAiming = false;
+	float DemoAimDelay = 0.0f;
+	float DemoAimAzimuth = 0.0f;
+	float DemoAimTilt = 0.0f;
+	void TickSeek(float DeltaSeconds);
+	/** Picks the next face and the direction into it (false: nothing left that the rain can reach). */
+	bool PickSeekTarget();
 
 	/** r.AntiAliasingMethod before the game set FXAA (restored at EndPlay: the film scene keeps its own). */
 	int32 PreviousAntiAliasing = -1;

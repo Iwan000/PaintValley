@@ -1718,15 +1718,16 @@ void ARainPaintGame::StartDemo()
 {
 	auto Exec = [this](const TCHAR* Command) { GEngine->Exec(GetWorld(), Command); };
 	auto Say = [this](const TCHAR* Text) { return [this, Text]() { DemoCaption = Text; }; };
-	// A level with one system, aimed, the round running.
-	auto Play = [this](int32 Level, bool bBalls, float Azimuth, float Tilt, float Spin)
+	// A level with one system, aimed, the round running; with bSeek the demo's player takes over the aim (and the view).
+	auto Play = [this](int32 Level, bool bBalls, float Azimuth, float Tilt, bool bSeek)
 	{
-		return [this, Level, bBalls, Azimuth, Tilt, Spin]()
+		return [this, Level, bBalls, Azimuth, Tilt, bSeek]()
 		{
 			StartLevel(Level);
 			SetPaintBallMode(bBalls);
 			SetDirection(Azimuth, Tilt);
-			DemoSpin = Spin;
+			bDemoSeek = bSeek;
+			DemoSeekEpoch = -1.0f;
 			StartRound();
 		};
 	};
@@ -1737,41 +1738,41 @@ void ARainPaintGame::StartDemo()
 	};
 	DemoSteps = {
 		{ 0.0f, [this, Exec]() { Exec(TEXT("rain.paint.Count 100000")); Exec(TEXT("rain.paint.Balls 3500")); Exec(TEXT("rain.paint.BallsGPU 0"));
-			Exec(TEXT("fx.Niagara.Debug.Hud OverviewLocation=30,520")); SetFilmDrops(false); } },
-		{ 0.0f, Play(7, false, 30.0f, 30.0f, 14.0f) },
+			Exec(TEXT("fx.Niagara.Debug.Hud OverviewLocation=30,520")); Exec(TEXT("stat fps")); SetFilmDrops(false); } },
+		{ 0.0f, Play(7, false, 30.0f, 30.0f, true) },
 		{ 0.0f, Say(TEXT("Paint Valley: steer a rain of paint until it covers the cream blocks")) },
-		{ 8.0f, Play(0, false, 45.0f, 25.0f, 20.0f) },
+		{ 8.0f, Play(0, false, 45.0f, 25.0f, true) },
 		{ 8.0f, Say(TEXT("System 1: 100,000 GPU drops. Every landing is read back from the GPU and paints the surface")) },
 		{ 16.0f, Say(TEXT("Paint spreads as puddles that join. Drops that land on paint grow it")) },
-		{ 21.0f, [this]() { DemoSpin = 0.0f; BallPress(); } },
+		{ 21.0f, [this]() { BallPress(); } },
 		{ 21.0f, Say(TEXT("Hold the trackball still: the rain freezes and the clock stops")) },
 		{ 25.0f, [this]() { BallRelease(); } },
 		// Canopy: the roof overhangs the long block by a cell, two cells above it; from the open side (+Y), tilted low.
-		{ 26.0f, Play(1, false, -90.0f, 70.0f, 0.0f) },
+		{ 26.0f, Play(1, false, -90.0f, 70.0f, false) },
 		{ 26.0f, Say(TEXT("Canopy: tilt the rain low to reach under the roof")) },
-		{ 33.0f, [this]() { SetFilmDrops(true); } },
+		{ 33.0f, [this]() { SetFilmDrops(true); bDemoSeek = true; } },
 		{ 33.0f, Say(TEXT("Film look (F): each drop is a tiny lens that shows the scene behind it")) },
 		{ 40.0f, [this, Exec]() { SetFilmDrops(false); Exec(TEXT("rain.paint.BallWait 8")); } },
 		// Table: aimed at the ground just outside, the balls bounce once and skip in under the table top.
-		{ 40.0f, Play(6, true, 0.0f, 55.0f, 0.0f) },
+		{ 40.0f, Play(6, true, 0.0f, 55.0f, false) },
 		{ 40.0f, Say(TEXT("System 2: 3,500 CPU paint balls. They bounce off the level and burst on the target")) },
 		{ 46.0f, Say(TEXT("A bank shot: aimed at the ground, the balls skip in under the table top")) },
-		{ 52.0f, Play(4, true, 30.0f, 35.0f, 20.0f) },
+		{ 52.0f, Play(4, true, 30.0f, 35.0f, true) },
 		{ 52.0f, Say(TEXT("Balls collide with their nearest neighbours: a Particle Attribute Reader query on the CPU")) },
-		{ 60.0f, Play(0, false, 45.0f, 25.0f, 20.0f) },
+		{ 60.0f, Play(0, false, 45.0f, 25.0f, true) },
 		{ 60.0f, [Exec]() { Exec(TEXT("stat unit")); Exec(TEXT("NiagaraDebugHud 1")); } },
 		{ 60.0f, Say(TEXT("Scaling, live (rain.paint.Count): 100k drops, at the 120 Hz cap")) },
 		{ 63.0f, Count(TEXT("rain.paint.Count 400000"), false) }, { 63.0f, Say(TEXT("Scaling, live (rain.paint.Count): 400k drops")) },
 		{ 66.5f, Count(TEXT("rain.paint.Count 1600000"), false) },
 		{ 66.5f, Say(TEXT("1.6M drops: the GPU sets the pace (about 50 ms a frame); the game thread stays under 3 ms")) },
 		{ 73.0f, [this, Exec]() { Exec(TEXT("rain.paint.Count 100000")); Exec(TEXT("rain.paint.Balls 8000")); SetupRain(); SetupPaintBalls(); } },
-		{ 73.0f, Play(3, true, 45.0f, 25.0f, 0.0f) },
+		{ 73.0f, Play(3, true, 45.0f, 25.0f, true) },
 		{ 73.0f, Say(TEXT("8,000 paint balls on the CPU: the game thread (stat unit: Game) climbs to about 7 ms")) },
 		{ 78.0f, Count(TEXT("rain.paint.BallsGPU 1"), true) },
 		{ 78.0f, Say(TEXT("The same HLSL on the GPU (rain.paint.BallsGPU 1): the game thread drops to about 1 ms")) },
 		{ 83.0f, [this, Exec]() { Exec(TEXT("NiagaraDebugHud 0")); Exec(TEXT("stat unit")); Exec(TEXT("rain.paint.BallsGPU 0")); Exec(TEXT("rain.paint.Balls 3500"));
 			Exec(TEXT("rain.paint.BallWait 30")); SetupPaintBalls(); } },
-		{ 83.0f, Play(7, false, 210.0f, 30.0f, 14.0f) },
+		{ 83.0f, Play(7, false, 210.0f, 30.0f, true) },
 		{ 83.0f, Say(TEXT("Paint Valley  |  UE 5.7, C++, Niagara  |  two systems, one mechanic")) },
 		{ 88.0f, [this]() { if (bQuitAfterDemo) { GEngine->Exec(GetWorld(), TEXT("quit")); } } },
 	};
@@ -1786,18 +1787,157 @@ void ARainPaintGame::TickDemo(float DeltaSeconds)
 		return;
 	}
 	DemoClock += DeltaSeconds;
-	if (DemoSpin != 0.0f && Phase == EPaintPhase::Painting)
-	{
-		SetDirection(SteerAzimuth + DemoSpin * DeltaSeconds, SteerTilt);
-	}
 	while (DemoSteps.IsValidIndex(DemoNext) && DemoSteps[DemoNext].At <= DemoClock)
 	{
 		DemoSteps[DemoNext++].Do();
 	}
+	TickSeek(DeltaSeconds);
 	if (!DemoSteps.IsValidIndex(DemoNext))
 	{
 		DemoClock = -1.0f;
-		DemoSpin = 0.0f;
+		bDemoSeek = false;
 		DemoCaption.Reset();
 	}
+}
+
+void ARainPaintGame::TickSeek(float DeltaSeconds)
+{
+	// Only while the rain falls and the ball is not held (a held ball freezes the rain).
+	if (!bDemoSeek || Phase != EPaintPhase::Painting || bBallHeld || Freeze > 0.0f)
+	{
+		return;
+	}
+	// A new round (a level, a new pool): the paint is gone; keep the scripted aim a moment before looking around.
+	if (Epoch != DemoSeekEpoch)
+	{
+		DemoSeekEpoch = Epoch;
+		DemoSeekSkip.Reset();
+		DemoSeekFace = INDEX_NONE;
+		DemoSeekClock = 2.0f;
+		DemoSeekHolds = 0;
+		bDemoAiming = false;
+	}
+	DemoSeekClock -= DeltaSeconds;
+	if (DemoSeekClock <= 0.0f)
+	{
+		// Balls take longer to arrive (a wait in the cloud, a flight): look again less often.
+		DemoSeekClock = bPaintBallMode ? 4.5f : 3.0f;
+		const int32 Gained = DemoSeekFace != INDEX_NONE ? Surface.FacePainted(DemoSeekFace) - DemoSeekPainted : 0;
+		// The rain is filling the face aimed at: stay on it once more (the rain only).
+		if (Gained > 0 && DemoSeekHolds < 1 && !bPaintBallMode)
+		{
+			DemoSeekPainted += Gained;
+			++DemoSeekHolds;
+			return;
+		}
+		// It gained no paint since: out of reach (shaded, or the aim lands short); leave it.
+		if (DemoSeekFace != INDEX_NONE && Gained <= 0)
+		{
+			DemoSeekSkip.Add(DemoSeekFace);
+		}
+		DemoSeekHolds = 0;
+		bDemoAiming = PickSeekTarget();
+	}
+	if (DemoAimDelay > 0.0f)
+	{
+		DemoAimDelay -= DeltaSeconds;
+		return;
+	}
+	if (bDemoAiming)
+	{
+		// Eased towards the aim, at most 80 degrees a second.
+		const float Ease = 1.0f - FMath::Exp(-3.5f * DeltaSeconds);
+		const float Cap = 80.0f * DeltaSeconds;
+		const float Azimuth = SteerAzimuth + FMath::Clamp(FMath::FindDeltaAngleDegrees(SteerAzimuth, DemoAimAzimuth) * Ease, -Cap, Cap);
+		const float Tilt = SteerTilt + FMath::Clamp((DemoAimTilt - SteerTilt) * Ease, -Cap, Cap);
+		SetDirection(Azimuth, Tilt);
+	}
+}
+
+bool ARainPaintGame::PickSeekTarget()
+{
+	auto Along = [](float Azimuth, float Tilt)
+	{
+		const double A = FMath::DegreesToRadians(Azimuth), T = FMath::DegreesToRadians(Tilt);
+		return FVector(FMath::Sin(T) * FMath::Cos(A), FMath::Sin(T) * FMath::Sin(A), -FMath::Cos(T));
+	};
+	// Into a side face: from across its normal, a few tilts and turns either way. Onto a top face: from above, any
+	// side (under a roof, from the open one).
+	static const float SideTilts[] = { 55.0f, 70.0f, 40.0f, 80.0f };
+	static const float SideTurns[] = { 0.0f, 25.0f, -25.0f, 50.0f, -50.0f };
+	static const float TopTilts[] = { 20.0f, 40.0f, 60.0f, 75.0f };
+	static const float TopTurns[] = { 0.0f, 45.0f, -45.0f, 90.0f, -90.0f, 135.0f, -135.0f, 180.0f };
+	const FVector Now = Direction();
+	TArray<FVector> Samples;
+	FVector N;
+	for (int32 Tries = 0; Tries < 8; ++Tries)
+	{
+		const int32 Face = Surface.BarestFace(DemoSeekSkip, FRotator(ViewPitch, TargetYaw, 0.0f).Vector(), 1.6f, Samples, N);
+		if (Face == INDEX_NONE)
+		{
+			return false;
+		}
+		const bool bSide = FMath::Abs(N.Z) < 0.5;
+		const float From = bSide ? float(FMath::RadiansToDegrees(FMath::Atan2(-N.Y, -N.X))) : SteerAzimuth;
+		const TArrayView<const float> Tilts = bSide ? MakeArrayView(SideTilts) : MakeArrayView(TopTilts);
+		const TArrayView<const float> Turns = bSide ? MakeArrayView(SideTurns) : MakeArrayView(TopTurns);
+		float BestScore = -1.0f, BestOpen = 0.0f;
+		for (const float Tilt : Tilts)
+		{
+			for (const float Turn : Turns)
+			{
+				const FVector D = Along(From + Turn, Tilt);
+				const float Facing = float(-(D | N));
+				if (Facing < 0.25f)
+				{
+					continue;
+				}
+				// The share of the bare texels the rain reaches from there (an open line back upwind), more head-on up to
+				// about 55 degrees off the face, and the less to turn the better.
+				int32 Open = 0;
+				for (const FVector& P : Samples)
+				{
+					Open += Surface.IsOpen(P + N, -D) ? 1 : 0;
+				}
+				const float Share = float(Open) / FMath::Max(Samples.Num(), 1);
+				const float Turned = float(FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(D | Now, -1.0, 1.0))));
+				const float Score = Share * (0.6f + 0.4f * FMath::Min(Facing / 0.8f, 1.0f)) - 0.1f * Turned / 180.0f;
+				if (Score > BestScore)
+				{
+					BestScore = Score;
+					BestOpen = Share;
+					DemoAimAzimuth = FMath::UnwindDegrees(From + Turn);
+					DemoAimTilt = Tilt;
+				}
+			}
+		}
+		if (BestOpen < 0.34f)
+		{
+			DemoSeekSkip.Add(Face);
+			continue;
+		}
+		DemoSeekFace = Face;
+		DemoSeekPainted = Surface.FacePainted(Face);
+		// Out of sight from this quarter (turned away from the camera): turn the view first, the fewest quarters that
+		// show it best, and steer once the view has turned.
+		auto Seen = [this, &N](float Yaw) { return float(FRotator(ViewPitch, Yaw, 0.0f).Vector() | N); };
+		if (Seen(TargetYaw) > -0.2f)
+		{
+			float BestYaw = TargetYaw;
+			for (const float Turn : { 90.0f, -90.0f, 180.0f })
+			{
+				if (Seen(TargetYaw + Turn) < Seen(BestYaw) - 0.05f)
+				{
+					BestYaw = TargetYaw + Turn;
+				}
+			}
+			if (BestYaw != TargetYaw)
+			{
+				TargetYaw = BestYaw;
+				DemoAimDelay = 0.7f;
+			}
+		}
+		return true;
+	}
+	return false;
 }

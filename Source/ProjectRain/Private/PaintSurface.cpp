@@ -999,6 +999,51 @@ int32 FPaintSurface::FullFaces(int32 Box) const
 	return Mask;
 }
 
+int32 FPaintSurface::BarestFace(const TSet<int32>& Skip, const FVector& View, float HiddenWeight, TArray<FVector>& Samples, FVector& Normal, int32 MaxSamples) const
+{
+	int32 Best = INDEX_NONE;
+	float BestBare = 0.0f;
+	for (int32 f = 0; f < Faces.Num(); ++f)
+	{
+		const FFace& F = Faces[f];
+		const float Bare = float(F.Scored - F.Painted) * ((F.N | View) > -0.2 ? HiddenWeight : 1.0f);
+		if (Skip.Contains(f) || F.Scored == 0 || float(F.Painted) >= FullShare * F.Scored || Bare <= BestBare)
+		{
+			continue;
+		}
+		Best = f;
+		BestBare = Bare;
+	}
+	Samples.Reset();
+	if (Best == INDEX_NONE)
+	{
+		return INDEX_NONE;
+	}
+	const FFace& F = Faces[Best];
+	Normal = F.N;
+	TArray<int32> Bare;
+	for (int32 k = 0; k < F.NU * F.NV; ++k)
+	{
+		const int32 t = F.First + k;
+		if (Texels[t].bVisible && Texels[t].bTarget && !Painted[t])
+		{
+			Bare.Add(t);
+		}
+	}
+	const int32 Step = FMath::Max(Bare.Num() / FMath::Max(MaxSamples, 1), 1);
+	for (int32 i = Step / 2; i < Bare.Num() && Samples.Num() < MaxSamples; i += Step)
+	{
+		Samples.Add(FVector(Texels[Bare[i]].P));
+	}
+	return Best;
+}
+
+bool FPaintSurface::IsOpen(const FVector& At, const FVector& Dir) const
+{
+	constexpr float Far = 1.0e5f;
+	return RayHit(At, Dir, Far, CollisionBoxIndices()) >= Far;
+}
+
 void FPaintSurface::Tick(float DeltaSeconds)
 {
 	// Fed growth, in batches: the faces fed since the last batch regroup and set their outlines moving.

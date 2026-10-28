@@ -1,4 +1,6 @@
-# Paint Valley — Niagara at Scale (course project, branch `paint`)
+# Paint Valley — Niagara at Scale (course project, release `v2.0-paintvalley`)
+
+Cheng Guo (cg401@duke.edu), developed in collaboration with Claude Opus 5.5 (Anthropic).
 
 A puzzle game where **Niagara particles paint the level**. Structures of grid blocks float in Monument Valley's style. You steer a stream of paint with a trackball until it covers 90 % of the cream target blocks; the clock is the score, and the pool of paint can run out. Blockers and the ground take no paint. Paint spreads as puddles that join, and drops that land on paint grow it. The mechanic borrows from *Auditorium* (a particle stream bent by the player until it fills its targets). The earlier version, Rain Shield, is the tag `v1.0-rainshield`; its section below is unchanged.
 
@@ -13,14 +15,17 @@ The same mechanic has two configurations; press **Tab** before a round to switch
 | Back to gameplay | Each drop landing on a target face that is not full → Export Particle Data (GPU readback) → paint, pool | Each burst on the target → Export Particle Data → paint, pool |
 
 **Performance report:** `Docs/PaintValleyReport.pdf` (2 pages). Data: `Docs/Perf/paint_sweep.csv`. Profiler captures: `Docs/Perf/paint_*`.
-**Video:** `Renders/PaintValley_video.mp4` (86 s, 1080p; video files are not in git). It is a recording of the scripted tour `-PaintDemo` (`Scripts/paint_demo.sh`), with a stat overlay segment while the particle count changes live.
+**Video:** [PaintValley_video.mp4](https://github.com/Iwan000/PaintValley/releases/tag/v2.0-paintvalley) on the release page (86 s, 1080p; video files are not in git, locally `Renders/PaintValley_video.mp4`). It is a recording of the scripted tour `-PaintDemo` (`Scripts/paint_demo.sh`). `stat fps` is on throughout, and `stat unit` and the Niagara debug HUD join it while the particle count changes live. In the tour a scripted player aims like a person would: it finds the target faces still bare, turns the view to them (Q / E) and steers the paint there.
 **Design notes:** `Docs/PaintValley.md` (rules, both systems, levels, code map). Art notes: `Docs/ArtDirection.md`.
 
 ## Build and run (Paint Valley)
 
-1. Build the editor target, as for Rain Shield below:
+1. Build the editor target with Unreal Engine 5.7 (C++ project; the plugins it uses ship with the engine):
    ```sh
+   # macOS (where it was developed and measured: MacBook Pro M2 Pro, Metal)
    "<UE_5.7>/Engine/Build/BatchFiles/Mac/Build.sh" ProjectRainEditor Mac Development -Project="$PWD/ProjectRain.uproject" -WaitMutex
+   # Windows (the standard command; not tested on Windows), or right-click the .uproject > Generate Visual Studio project files
+   "<UE_5.7>\Engine\Build\BatchFiles\Build.bat" ProjectRainEditor Win64 Development -Project="%CD%\ProjectRain.uproject" -WaitMutex
    ```
 2. Open `ProjectRain.uproject`. It opens **`/Game/RainMagic/Maps/L_PaintValley`**, which is also the game's default map. Press Play.
 3. All assets are generated from code, and the generated `.uasset` files are committed. To regenerate them, run this in the editor's Python console:

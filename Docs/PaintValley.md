@@ -144,7 +144,7 @@ Command-line options:
 - `-PaintBalls` starts in System 2.
 - `-PaintBallsGPU` starts with System 2 on the GPU (`rain.paint.BallsGPU 1`).
 - `-PaintMeasure` measures and quits (`-PaintMeasureSettle=S` sets the settle time; `-PaintMeasureNoNiagara` leaves out the per-system Niagara timers).
-- `-PaintDemo` plays the scripted ~88 s tour of the video (`-PaintDemoQuit` quits at the end; `Scripts/paint_demo.sh` records it).
+- `-PaintDemo` plays the scripted ~88 s tour of the video (`-PaintDemoQuit` quits at the end; `Scripts/paint_demo.sh` records it). `stat fps` stays on throughout. Outside the scripted shots (Canopy's low tilt, Table's bank shot), a demo player aims: every 3 s (4.5 s with balls) it picks the target's barest face that an open line upwind can reach. Sides out of sight count 1.6 times, so it turns the view to them (a quarter, as Q / E). It then steers there gradually, as the trackball would.
 
 ## Performance
 
