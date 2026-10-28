@@ -37,7 +37,7 @@ author: "Iwan000 · cg401@duke.edu · Oct 2026"
 | | count | frame ms | Niagara GT+RT ms | game thread ms |
 |---|---:|---:|---:|---:|
 | rain (GPU sprites) | 0 / **100k** / 400k / 800k / 1.6M | 8.33 / **8.33** / 14.8 / 26.2 / 50.0 | 0.05 / **0.10** / 0.10 / 0.11 / 0.11 | 0.9 / **1.5** / 1.4 / 1.7 / 2.0 |
-| paint balls (CPU meshes) | 500 / **3.5k** / 8k / 16k | 8.33 / **8.36** / 8.35 / 15.2 | 0.51 / **2.63** / 5.83 / 12.28 | 1.5 / **3.6** / 6.6 / 13.1 |
+| paint balls (CPU meshes) | 500 / **3.5k** / 8k / 16k | 8.33 / **8.36** / 8.35 / 12.3 | 0.51 / **2.63** / 5.83 / 11.59 | 1.5 / **3.6** / 6.6 / 12.3 |
 | paint balls, GPU port | 500 / 3.5k / 16k / 32k / 64k | 8.36 / 8.35 / 8.99 / 14.4 / 25.0 | 0.06 / 0.05 / 0.07 / 0.08 / 0.07 | 1.0 / 0.9 / 0.8 / 0.8 / 0.8 |
 
 ## Scaling and breaking points
@@ -48,13 +48,13 @@ author: "Iwan000 · cg401@duke.edu · Oct 2026"
   - Niagara's CPU cost stays at 0.1 ms up to 1.6M drops, so the 4 ms Niagara budget never breaks.
 - **System 2 on the CPU is linear in the balls:** 0.72 µs of CPU per ball. Each ball runs branch-free VM code with 32 swept box tests, a neighbour query (9 candidate balls, 24 reader lookups) and an export.
   - The 4 ms Niagara budget breaks at about **5.4k balls**. The default of 3.5k uses 2.6 ms of it.
-  - The frame holds the cap up to 8k balls. At 16k the game thread (13.1 ms) sets the pace.
+  - The frame holds the cap up to 8k balls. At 16k the game thread (12.3 ms) sets the pace.
 
 ## Optimisations, before → after (same build, reproducible with the cvars)
 
 1. **CPU → GPU port of the paint balls** (`rain.paint.BallsGPU 0 → 1`: the same HLSL with the sim target flipped, and the reader and the export on the GPU).
    - At the default 3.5k balls, Niagara CPU time drops from 2.63 to 0.05 ms (−98 %), and the game thread from 3.6 to 0.9 ms. The frame stays at the cap.
-   - At 16k balls, the frame drops from 15.2 to 9.0 ms (−41 %), and Niagara CPU time from 12.3 to 0.07 ms.
+   - At 16k balls, the frame drops from 12.3 to 9.0 ms (−27 %), and Niagara CPU time from 11.6 to 0.07 ms.
    - The CPU breaking point (about 5.4k balls) is gone. The GPU version breaks the frame budget at about **39k balls**, at 0.34 µs of GPU per ball (12 drops' worth).
    - In Rain Shield the same port made the frame worse, because that lit scene was GPU-bound (26.5 ms). This unlit scene leaves the GPU mostly idle, so moving work onto it pays.
    - Decision: System 2 ships on the CPU at 3.5k balls. It fits the budget with 1.4 ms to spare, and its bursts reach gameplay in the same frame. The port is kept as a runtime switch for larger counts.
@@ -67,7 +67,7 @@ A rendering change outside Niagara mattered more than either. TSR, the default a
 
 ## Many simple vs few complex
 
-At equal frame time (the 16.6 ms budget), the machine runs **460k drops, or 39k GPU balls, or about 18k CPU balls**. On the GPU one ball costs as much as 12 drops; on the CPU it costs 25 drops' worth of time.
+At equal frame time (the 16.6 ms budget), the machine runs **460k drops, or 39k GPU balls, or about 22k CPU balls**. On the GPU one ball costs as much as 12 drops; on the CPU it costs 25 drops' worth of time.
 
 - **The rain makes the better base game.** Paint arrives as a smooth flux, so coverage rises predictably, and the puzzle is pure aiming: which faces a direction reaches and which ones the blockers shade. Readback is cheap (one record a landing), and the count can grow 4.6× before the budget breaks.
 - **The balls make levels that the rain cannot.** Each ball is readable, and outcomes come from individual paths. On Table, a bank shot off the ground paints the slab under the table top (75 % in 10 s, against 42 % fired straight in); on Pinball, balls rebound off bumpers. That is skill expression, but outcomes are noisier, and every rule costs CPU per ball.

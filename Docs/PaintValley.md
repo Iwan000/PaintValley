@@ -155,7 +155,7 @@ The measurements, the method and the analysis are in **`Docs/PaintValleyReport.p
   - The 4 ms Niagara budget breaks at about 5.4k balls; the default 3,500 uses 2.6 ms.
 - **The GPU port** (`rain.paint.BallsGPU 1`).
   - Niagara CPU time drops to about 0.05 ms at any count.
-  - At 16k balls the frame drops from 15.2 to 9.0 ms. The port breaks the frame budget at about 39k balls.
+  - At 16k balls the frame drops from 12.3 to 9.0 ms. The port breaks the frame budget at about 39k balls.
 - **Pausing the idle system** makes no measurable difference: the idle particles wait hidden in the cloud.
 
 **Numbers taken before 2026-10-28 11:20 are wrong.** Changing a pool at runtime used to keep the old pool alive (500 balls requested, 4,000 live). `Activate(true)` re-fired the spawn burst on top of the old particles; `ReinitializeSystem()` now replaces the instance. The sweeps now set the pools at launch (`-PaintCount=`, `-PaintBallCount=`) and log the live count.
